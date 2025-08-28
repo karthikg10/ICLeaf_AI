@@ -1,0 +1,637 @@
+# backend/app/main.py
+from typing import List
+import os
+import shutil
+
+from fastapi import FastAPI, Body, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from openai import OpenAI
+
+
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from datetime import datetime
+from io import BytesIO
+from fastapi.responses import StreamingResponse
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import inch
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+
+
+
+# our modules
+import app.rag_store as rag
+from app.ingest_dir import ingest_dir
+from .models import (
+    ChatRequest, ChatResponse, Source, Message,
+    GenerateRequest, GenerateResponse
+)
+from . import deps               # env + config
+from . import web_cloud as wc    # cloud helpers (tavily / yt / github)
+
+app = FastAPI(title="ICLeaF Chatbot", version="0.2")
+
+# ---- preload your repo docs on boot (Internal mode data) ----
+@app.on_event("startup")
+def _preload_docs():
+    docs_dir = os.getenv("DOCS_DIR", "./seed_docs")
+    reindex = os.getenv("REINDEX_ON_START", "false").lower() == "true"
+
+    if not os.path.isdir(docs_dir):
+        print(f"[startup] DOCS_DIR not found: {docs_dir}")
+        return
+
+    if reindex:
+        # delete on-disk index and reset collection
+        shutil.rmtree("./data/chroma", ignore_errors=True)
+        rag.reset_index()
+
+    count_added = ingest_dir(docs_dir)
+    print(f"[startup] Ingested {count_added} chunks from {docs_dir} (REINDEX_ON_START={reindex})")
+
+
+
+
+
+
+
+def _build_pdf_bytes(
+    title: str,
+    content: str,
+    sources: List[Source],
+    meta: dict,
+) -> bytes:
+    """
+    Build a simple, clean PDF from generated content + sources using reportlab.
+    """
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=0.8*inch,
+        rightMargin=0.8*inch,
+        topMargin=0.8*inch,
+        bottomMargin=0.8*inch,
+        title=title,
+        author="ICLeaF LMS",
+    )
+
+    styles = getSampleStyleSheet()
+    h1 = styles["Heading1"]
+    h2 = styles["Heading2"]
+    body = styles["BodyText"]
+    mono = ParagraphStyle("Mono", parent=body, fontName="Courier", fontSize=9, leading=11)
+
+    story = []
+
+    # Title
+    story.append(Paragraph(title, h1))
+    story.append(Spacer(1, 0.2*inch))
+
+    # Metadata block
+    when = meta.get("generated_at") or datetime.now().strftime("%Y-%m-%d %H:%M")
+    role = meta.get("role", "Learner")
+    mode = meta.get("mode", "internal").title()
+    kind = meta.get("kind", "summary").title()
+
+    story.append(Paragraph(f"<b>Type:</b> {kind}", body))
+    story.append(Paragraph(f"<b>Role:</b> {role}", body))
+    story.append(Paragraph(f"<b>Mode:</b> {mode}", body))
+    story.append(Paragraph(f"<b>Generated:</b> {when}", body))
+    story.append(Spacer(1, 0.25*inch))
+
+    # Content
+    story.append(Paragraph("Content", h2))
+    story.append(Spacer(1, 0.1*inch))
+
+    # Split on double newlines to keep paragraphs readable
+    for para in content.split("\n\n"):
+        story.append(Paragraph(para.strip().replace("\n", "<br/>"), body))
+        story.append(Spacer(1, 0.08*inch))
+
+    # Sources
+    if sources:
+        story.append(Spacer(1, 0.25*inch))
+        story.append(Paragraph("Sources", h2))
+        story.append(Spacer(1, 0.1*inch))
+        for i, s in enumerate(sources, 1):
+            title = s.title or "Document"
+            if s.url:
+                # show url in a monospaced smaller line (not clickable in pure text PDF)
+                story.append(Paragraph(f"[{i}] {title}", body))
+                story.append(Paragraph(str(s.url), mono))
+            else:
+                story.append(Paragraph(f"[{i}] {title}", body))
+            story.append(Spacer(1, 0.04*inch))
+
+    doc.build(story)
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
+
+
+
+
+
+
+def _build_pptx_bytes(
+    title: str,
+    content: str,
+    sources: List[Source],
+    meta: dict,
+) -> bytes:
+    """
+    Build a simple PPTX:
+      - Title slide
+      - Content broken into slides by heuristics
+      - A Sources slide at the end
+    """
+    prs = Presentation()
+    # Common sizes
+    title_layout = prs.slide_layouts[0]   # Title
+    bullet_layout = prs.slide_layouts[1]  # Title + Content
+
+    # Title slide
+    slide = prs.slides.add_slide(title_layout)
+    slide.shapes.title.text = title
+    subtitle = slide.placeholders[1]
+    subtitle.text = f"{meta.get('kind','Summary').title()} • {meta.get('role','Learner')} • {meta.get('mode','internal').title()}"
+
+    # Prepare content blocks
+    # Split on double newlines for paragraphs/sections
+    blocks = [b.strip() for b in content.split("\n\n") if b.strip()]
+
+    def add_bullet_slide(title_text: str, bullets: list[str]):
+        slide = prs.slides.add_slide(bullet_layout)
+        slide.shapes.title.text = title_text
+        body = slide.shapes.placeholders[1].text_frame
+        body.clear()
+        for i, line in enumerate(bullets):
+            # strip leading list characters
+            txt = line.strip().lstrip("-•*").strip()
+            if i == 0:
+                body.text = txt
+            else:
+                p = body.add_paragraph()
+                p.text = txt
+                p.level = 0
+        # make text a bit larger
+        for p in body.paragraphs:
+            for run in p.runs:
+                run.font.size = Pt(18)
+
+    # Heuristic: if a block is a bullet list (multiple lines starting with -/*/•), keep them on one slide.
+    current_bullets = []
+    current_title = "Content"
+    slide_count = 0
+
+    def flush_bullets():
+        nonlocal current_bullets, current_title, slide_count
+        if current_bullets:
+            add_bullet_slide(current_title if slide_count == 0 else f"{current_title} (cont.)", current_bullets[:10])
+            current_bullets = []
+            slide_count += 1
+
+    for block in blocks:
+        lines = block.split("\n")
+        is_bullety = sum(1 for ln in lines if ln.strip().startswith(("-", "*", "•"))) >= max(2, len(lines)//2)
+
+        if is_bullety:
+            # add as one bullets slide
+            flush_bullets()
+            bullets = [ln for ln in lines if ln.strip()]
+            add_bullet_slide("Key Points", bullets[:10])
+            slide_count += 1
+        else:
+            # normal paragraph; collect and wrap bullets every ~8 lines
+            for ln in lines:
+                if not ln.strip():
+                    continue
+                # break long paragraphs into pseudo bullets
+                current_bullets.append(ln.strip())
+                if len(current_bullets) >= 8:
+                    flush_bullets()
+    flush_bullets()
+
+    # Sources slide
+    if sources:
+        slide = prs.slides.add_slide(bullet_layout)
+        slide.shapes.title.text = "Sources"
+        body = slide.shapes.placeholders[1].text_frame
+        body.clear()
+        for i, s in enumerate(sources, 1):
+            title_line = f"[{i}] {s.title or 'Document'}"
+            if i == 1:
+                body.text = title_line
+            else:
+                p = body.add_paragraph()
+                p.text = title_line
+                p.level = 0
+            # add URL as a sub-bullet if present
+            if s.url:
+                p2 = body.add_paragraph()
+                p2.text = str(s.url)
+                p2.level = 1
+        for p in body.paragraphs:
+            for run in p.runs:
+                run.font.size = Pt(16)
+
+    bio = BytesIO()
+    prs.save(bio)
+    return bio.getvalue()
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ---- CORS (for the React frontend) ----
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=deps.ALLOWED_ORIGINS if deps.ALLOWED_ORIGINS else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---- LLM client ----
+client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else None
+
+@app.get("/health")
+def health():
+    return {"ok": True, "modes": ["cloud", "internal"]}
+
+@app.get("/stats")
+def stats():
+    return {
+        "docs_dir": os.getenv("DOCS_DIR", "./seed_docs"),
+        "index_count": rag.count(),
+        "modes": ["cloud", "internal"]
+    }
+
+@app.get("/internal/search")
+def internal_search(q: str = Query(..., min_length=2), top_k: int = 6):
+    hits = rag.query(q, top_k=top_k)
+    results = []
+    for h in hits:
+        meta = h.get("meta", {})
+        results.append({
+            "snippet": h["text"][:400],
+            "title": meta.get("title", meta.get("filename", "Document")),
+            "filename": meta.get("filename"),
+            "page": meta.get("page"),
+            "score": h.get("score"),
+        })
+    return {"ok": True, "q": q, "results": results}
+
+@app.get("/internal/topics")
+def internal_topics(top_n: int = 20):
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+    except Exception as e:
+        return {"ok": False, "msg": f"scikit-learn not installed: {e}"}
+
+    docs, metas = rag.all_documents()
+    if not docs:
+        return {"ok": True, "topics": []}
+
+    vec = TfidfVectorizer(max_features=5000, ngram_range=(1,2), stop_words="english")
+    X = vec.fit_transform(docs)
+    means = X.mean(axis=0).A1
+    feats = vec.get_feature_names_out()
+    top = sorted(zip(means, feats), reverse=True)[:top_n]
+    topics = [t for _, t in top]
+    return {"ok": True, "topics": topics}
+
+@app.post("/reindex")
+def reindex(
+    docs_dir: str = Body(None),
+    drop_db: bool = Body(False),
+):
+    """
+    Force reindex:
+      - optionally remove ./data/chroma on disk (drop_db=True)
+      - reset the Chroma collection
+      - ingest docs from docs_dir (or DOCS_DIR env)
+    """
+    root = docs_dir or os.getenv("DOCS_DIR", "./seed_docs")
+    if drop_db:
+        shutil.rmtree("./data/chroma", ignore_errors=True)
+    rag.reset_index()
+
+    if not os.path.isdir(root):
+        return {"ok": False, "msg": f"docs_dir not found: {root}", "index_count": rag.count()}
+
+    added = ingest_dir(root)
+    return {"ok": True, "docs_dir": root, "chunks_added": added, "index_count": rag.count()}
+
+# ========= CONTENT GENERATION =========
+@app.post("/generate", response_model=GenerateResponse)
+async def generate(req: GenerateRequest = Body(...)):
+    """
+    Generate educational content (summary, quiz, or lesson plan)
+    using either Internal (RAG) or Cloud context.
+    """
+    if client is None:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+    # --------- Gather context + sources ----------
+    context_blocks: List[str] = []
+    sources: List[Source] = []
+
+    if req.mode == "internal":
+        hits = rag.query(req.topic, top_k=req.top_k)
+        for h in hits:
+            meta = h.get("meta", {})
+            sources.append(
+                Source(
+                    title=meta.get("title", meta.get("filename", "Document")),
+                    url=meta.get("url"),
+                    score=h.get("score"),
+                )
+            )
+            context_blocks.append(h["text"])
+    else:  # cloud
+        if deps.TAVILY_API_KEY:
+            try:
+                web_results = await wc.tavily_search(req.topic, deps.TAVILY_API_KEY, max_results=req.max_context_blocks)
+                for r in web_results:
+                    sources.append(Source(title=r.get("title") or r.get("url", "Web page"),
+                                          url=r.get("url"), score=r.get("score")))
+                    if r.get("url"):
+                        try:
+                            txt = await wc.fetch_url_text(r["url"])
+                            if txt:
+                                context_blocks.append(txt)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+    if len(context_blocks) > req.max_context_blocks:
+        context_blocks = context_blocks[:req.max_context_blocks]
+
+    # --------- Build prompts ----------
+    role_hint = {
+        "Learner":  "Use beginner-friendly language, short paragraphs, and examples.",
+        "Trainer":  "Be detailed, structured, and include objectives/outcomes.",
+        "Admin":    "Be concise, structured, and highlight compliance/policy relevance.",
+    }.get(req.role, "Use clear and concise language.")
+
+    if req.kind == "summary":
+        task_hint = (
+            "Write a crisp 6–10 bullet summary of the key concepts. "
+            "Avoid hallucinations; only use the provided context. "
+            "Finish with 2–3 practical tips or cautions."
+        )
+    elif req.kind == "quiz":
+        task_hint = (
+            f"Generate {req.num_questions} multiple-choice questions (MCQs) with 1 correct answer and 3 plausible distractors. "
+            "Vary difficulty. After the list, include an **Answer Key** mapping Q# to the correct option. "
+            "Only use facts present in the context."
+        )
+    else:  # lesson
+        task_hint = (
+            "Create a compact lesson plan with sections: Objectives, Prerequisites, Outline (with time boxes), "
+            "Hands-on Activity, Assessment, and Further Reading. Only use the provided context."
+        )
+
+    system_prompt = (
+        "You are ICLeaF LMS's content generator.\n"
+        f"Audience role: {req.role}.\n"
+        f"{role_hint}\n"
+        "If the answer cannot be supported by the context, say you don't know."
+    )
+
+    ctx = "\n\n".join([f"[Block {i+1}]\n{b}" for i, b in enumerate(context_blocks)]) if context_blocks else ""
+    user_prompt = f"Task: {req.kind} for topic: '{req.topic}'.\n\nFollow these rules:\n- {task_hint}\n- Cite nothing beyond context."
+
+    messages: List[dict] = [{"role": "system", "content": system_prompt}]
+    if ctx:
+        messages.append({"role": "system", "content": f"Context:\n{ctx}"})
+    messages.append({"role": "user", "content": user_prompt})
+
+    completion = client.chat.completions.create(
+        model=deps.OPENAI_MODEL,
+        messages=messages,
+        temperature=0.3 if req.kind != "quiz" else 0.2,
+    )
+    content = completion.choices[0].message.content
+
+    if not context_blocks:
+        content = (
+            "I don't have enough context for this topic. "
+            f"Try switching mode or reindexing your internal docs. Topic: {req.topic}"
+        )
+
+    return GenerateResponse(ok=True, kind=req.kind, topic=req.topic, content=content, sources=sources)
+
+
+
+
+
+@app.post("/generate/pdf")
+async def generate_pdf(req: GenerateRequest = Body(...)):
+    """
+    Generate content (using the same rules as /generate) and return it as a PDF.
+    """
+    # Reuse the main generate() to avoid code duplication
+    gen = await generate(req)  # returns GenerateResponse
+    filename_safe_topic = "".join(c for c in req.topic if c.isalnum() or c in (" ", "_", "-")).strip().replace(" ", "_")
+    filename = f"{req.kind}_{filename_safe_topic or 'content'}.pdf"
+
+    meta = {
+        "role": req.role,
+        "mode": req.mode,
+        "kind": req.kind,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    pdf_bytes = _build_pdf_bytes(
+        title=f"{req.kind.title()}: {req.topic}",
+        content=gen.content,
+        sources=gen.sources,
+        meta=meta,
+    )
+
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+
+
+
+
+@app.post("/generate/pptx")
+async def generate_pptx(req: GenerateRequest = Body(...)):
+    """
+    Generate content (using /generate rules) and return it as a PPTX deck.
+    """
+    gen = await generate(req)  # reuse main logic
+    filename_safe_topic = "".join(c for c in req.topic if c.isalnum() or c in (" ", "_", "-")).strip().replace(" ", "_")
+    filename = f"{req.kind}_{filename_safe_topic or 'content'}.pptx"
+
+    meta = {
+        "role": req.role,
+        "mode": req.mode,
+        "kind": req.kind,
+    }
+    pptx_bytes = _build_pptx_bytes(
+        title=f"{req.kind.title()}: {req.topic}",
+        content=gen.content,
+        sources=gen.sources,
+        meta=meta,
+    )
+
+    return StreamingResponse(
+        BytesIO(pptx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+
+
+
+
+
+# ========= CHAT =========
+@app.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    """
+    Answers using either:
+      - Internal (RAG) mode: retrieve from your preloaded documents
+      - Cloud mode: web/YouTube/GitHub context (best-effort)
+    """
+    sources: List[Source] = []
+    context_blocks: List[str] = []
+
+    # INTERNAL (RAG)
+    if getattr(req, "mode", "cloud") == "internal":
+        hits = rag.query(req.message, top_k=getattr(req, "top_k", 4))
+        for h in hits:
+            meta = h.get("meta", {})
+            sources.append(
+                Source(
+                    title=meta.get("title", meta.get("filename", "Document")),
+                    url=meta.get("url"),
+                    score=h.get("score"),
+                )
+            )
+            context_blocks.append(h["text"])
+
+        system_prompt = (
+            "You are ICLeaF LMS's internal-mode assistant. "
+            f"User role: {req.role}. Answer ONLY using the provided context. "
+            "If the answer is not in the context, say you don’t know and suggest a follow‑up."
+        )
+        ctx = "\n\n".join([f"[Source {i+1}]\n{b}" for i, b in enumerate(context_blocks)]) if context_blocks else ""
+        messages: List[dict] = [{"role": "system", "content": system_prompt}]
+        if ctx:
+            messages.append({"role": "system", "content": f"Context for grounding:\n{ctx}"})
+        for m in req.history:
+            assert isinstance(m, Message)
+            messages.append(m.model_dump())
+        messages.append({"role": "user", "content": req.message})
+
+        if client is None:
+            answer = "LLM not configured (missing OPENAI_API_KEY)."
+        elif not context_blocks:
+            answer = "I couldn’t find this in the internal documents. Try rephrasing or checking Cloud mode."
+        else:
+            completion = client.chat.completions.create(
+                model=deps.OPENAI_MODEL,
+                messages=messages,
+                temperature=0.1,
+            )
+            answer = completion.choices[0].message.content
+
+        return ChatResponse(answer=answer, sources=sources)
+
+    # CLOUD (web / YouTube / GitHub)
+    if deps.TAVILY_API_KEY:
+        try:
+            web_results = await wc.tavily_search(req.message, deps.TAVILY_API_KEY, max_results=5)
+            for r in web_results:
+                sources.append(
+                    Source(
+                        title=r.get("title") or r.get("url", "Web page"),
+                        url=r.get("url"),
+                        score=r.get("score"),
+                    )
+                )
+                if r.get("url"):
+                    try:
+                        txt = await wc.fetch_url_text(r["url"])
+                        if txt:
+                            context_blocks.append(txt)
+                        if len(context_blocks) >= 8:
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    if len(context_blocks) < 8 and deps.YOUTUBE_API_KEY:
+        try:
+            yt_results = await wc.youtube_search(req.message, deps.YOUTUBE_API_KEY, max_results=3)
+            for y in yt_results:
+                sources.append(Source(title=f"YouTube: {y['title']}", url=y["url"]))
+                transcript = wc.youtube_fetch_transcript_text(y["videoId"])
+                if transcript:
+                    context_blocks.append(transcript)
+                if len(context_blocks) >= 8:
+                    break
+        except Exception:
+            pass
+
+    if len(context_blocks) < 8:
+        try:
+            gh_results = await wc.github_search_code(req.message, deps.GITHUB_TOKEN, max_results=3)
+            for g in gh_results:
+                text, dl_url = await wc.github_fetch_file_text(g.get("api_url"), deps.GITHUB_TOKEN)
+                title = f"GitHub: {g.get('repository_full_name')}/{g.get('path')}"
+                sources.append(Source(title=title, url=dl_url or g.get("html_url")))
+                if text:
+                    context_blocks.append(text)
+                if len(context_blocks) >= 8:
+                    break
+        except Exception:
+            pass
+
+    system_prompt = (
+        "You are ICLeaF LMS's cloud-mode assistant. "
+        f"User role: {req.role}. Provide concise, correct answers. "
+        "If context is provided, cite sources with [1], [2], ... matching the source list. "
+        "If you're unsure, say so."
+    )
+    ctx = "\n\n".join([f"[Source {i+1}]\n{b}" for i, b in enumerate(context_blocks)]) if context_blocks else ""
+    messages: List[dict] = [{"role": "system", "content": system_prompt}]
+    if ctx:
+        messages.append({"role": "system", "content": f"Context for grounding:\n{ctx}"})
+    for m in req.history:
+        assert isinstance(m, Message)
+        messages.append(m.model_dump())
+    messages.append({"role": "user", "content": req.message})
+
+    if client is None:
+        answer = "LLM not configured (missing OPENAI_API_KEY)."
+    else:
+        completion = client.chat.completions.create(
+            model=deps.OPENAI_MODEL,
+            messages=messages,
+            temperature=0.2,
+        )
+        answer = completion.choices[0].message.content
+
+    return ChatResponse(answer=answer, sources=sources)

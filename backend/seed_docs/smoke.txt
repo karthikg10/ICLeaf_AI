@@ -1,0 +1,1 @@
+ICLeaF smoke test: the mascot is a purple leaf.
