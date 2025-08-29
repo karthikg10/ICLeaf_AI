@@ -28,12 +28,19 @@ Environment Setup
 Create a .env file in backend/:
 
 OPENAI_API_KEY=your_openai_key_here
+
 TAVILY_API_KEY=your_tavily_key_here      # optional (for web search in Cloud mode)
+
 YOUTUBE_API_KEY=your_youtube_api_key     # optional
+
 GITHUB_TOKEN=your_github_pat             # optional
+
 DOCS_DIR=./seed_docs
+
 REINDEX_ON_START=false
+
 ALLOWED_ORIGINS=http://127.0.0.1:5173
+
 OPENAI_MODEL=gpt-4o-mini
 
 
