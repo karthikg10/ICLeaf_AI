@@ -129,11 +129,25 @@ def build_docs_for_dir(root_dir: str) -> List[Tuple[str, Dict]]:
             out.extend(docs)
     return out
 
-import app.rag_store as rag
+import app.rag_store_simple as rag
 
-def ingest_dir(root_dir: str) -> int:
+def ingest_dir(root_dir: str, subject_id: str = None, topic_id: str = None, uploaded_by: str = None) -> int:
     docs = build_docs_for_dir(root_dir)
     if docs:
+        # Add metadata to each document if provided
+        if subject_id or topic_id or uploaded_by:
+            enhanced_docs = []
+            for text, meta in docs:
+                enhanced_meta = meta.copy()
+                if subject_id:
+                    enhanced_meta["subjectId"] = subject_id
+                if topic_id:
+                    enhanced_meta["topicId"] = topic_id
+                if uploaded_by:
+                    enhanced_meta["uploadedBy"] = uploaded_by
+                enhanced_docs.append((text, enhanced_meta))
+            docs = enhanced_docs
+        
         rag.add_documents(docs)
     print(f"[ingest] Total chunks to add: {len(docs)}")
     return len(docs)

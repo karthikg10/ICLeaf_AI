@@ -5,6 +5,8 @@ import shutil
 
 from fastapi import FastAPI, Body, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi_limiter import FastAPILimiter
+from fastapi_limiter.depends import RateLimiter
 from openai import OpenAI
 
 
@@ -21,20 +23,26 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 
 
 # our modules
-import app.rag_store as rag
+import app.rag_store_simple as rag
 from app.ingest_dir import ingest_dir
 from .models import (
     ChatRequest, ChatResponse, Source, Message,
     GenerateRequest, GenerateResponse
 )
 from . import deps               # env + config
-from . import web_cloud as wc    # cloud helpers (tavily / yt / github)
+from .api_router import api_router  # API router with proper structure
 
 app = FastAPI(title="ICLeaF Chatbot", version="0.2")
 
+# Include the API router
+app.include_router(api_router)
+
 # ---- preload your repo docs on boot (Internal mode data) ----
 @app.on_event("startup")
-def _preload_docs():
+async def _preload_docs():
+    # Initialize rate limiter (commented out for testing)
+    # await FastAPILimiter.init()
+    
     docs_dir = os.getenv("DOCS_DIR", "./seed_docs")
     reindex = os.getenv("REINDEX_ON_START", "false").lower() == "true"
 
@@ -265,17 +273,7 @@ app.add_middleware(
 # ---- LLM client ----
 client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else None
 
-@app.get("/health")
-def health():
-    return {"ok": True, "modes": ["cloud", "internal"]}
-
-@app.get("/stats")
-def stats():
-    return {
-        "docs_dir": os.getenv("DOCS_DIR", "./seed_docs"),
-        "index_count": rag.count(),
-        "modes": ["cloud", "internal"]
-    }
+# Health and stats endpoints are now handled by api_router
 
 @app.get("/internal/search")
 def internal_search(q: str = Query(..., min_length=2), top_k: int = 6):
@@ -505,133 +503,4 @@ async def generate_pptx(req: GenerateRequest = Body(...)):
 
 
 
-# ========= CHAT =========
-@app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
-    """
-    Answers using either:
-      - Internal (RAG) mode: retrieve from your preloaded documents
-      - Cloud mode: web/YouTube/GitHub context (best-effort)
-    """
-    sources: List[Source] = []
-    context_blocks: List[str] = []
-
-    # INTERNAL (RAG)
-    if getattr(req, "mode", "cloud") == "internal":
-        hits = rag.query(req.message, top_k=getattr(req, "top_k", 4))
-        for h in hits:
-            meta = h.get("meta", {})
-            sources.append(
-                Source(
-                    title=meta.get("title", meta.get("filename", "Document")),
-                    url=meta.get("url"),
-                    score=h.get("score"),
-                )
-            )
-            context_blocks.append(h["text"])
-
-        system_prompt = (
-            "You are ICLeaF LMS's internal-mode assistant. "
-            f"User role: {req.role}. Answer ONLY using the provided context. "
-            "If the answer is not in the context, say you don’t know and suggest a follow‑up."
-        )
-        ctx = "\n\n".join([f"[Source {i+1}]\n{b}" for i, b in enumerate(context_blocks)]) if context_blocks else ""
-        messages: List[dict] = [{"role": "system", "content": system_prompt}]
-        if ctx:
-            messages.append({"role": "system", "content": f"Context for grounding:\n{ctx}"})
-        for m in req.history:
-            assert isinstance(m, Message)
-            messages.append(m.model_dump())
-        messages.append({"role": "user", "content": req.message})
-
-        if client is None:
-            answer = "LLM not configured (missing OPENAI_API_KEY)."
-        elif not context_blocks:
-            answer = "I couldn’t find this in the internal documents. Try rephrasing or checking Cloud mode."
-        else:
-            completion = client.chat.completions.create(
-                model=deps.OPENAI_MODEL,
-                messages=messages,
-                temperature=0.1,
-            )
-            answer = completion.choices[0].message.content
-
-        return ChatResponse(answer=answer, sources=sources)
-
-    # CLOUD (web / YouTube / GitHub)
-    if deps.TAVILY_API_KEY:
-        try:
-            web_results = await wc.tavily_search(req.message, deps.TAVILY_API_KEY, max_results=5)
-            for r in web_results:
-                sources.append(
-                    Source(
-                        title=r.get("title") or r.get("url", "Web page"),
-                        url=r.get("url"),
-                        score=r.get("score"),
-                    )
-                )
-                if r.get("url"):
-                    try:
-                        txt = await wc.fetch_url_text(r["url"])
-                        if txt:
-                            context_blocks.append(txt)
-                        if len(context_blocks) >= 8:
-                            break
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-
-    if len(context_blocks) < 8 and deps.YOUTUBE_API_KEY:
-        try:
-            yt_results = await wc.youtube_search(req.message, deps.YOUTUBE_API_KEY, max_results=3)
-            for y in yt_results:
-                sources.append(Source(title=f"YouTube: {y['title']}", url=y["url"]))
-                transcript = wc.youtube_fetch_transcript_text(y["videoId"])
-                if transcript:
-                    context_blocks.append(transcript)
-                if len(context_blocks) >= 8:
-                    break
-        except Exception:
-            pass
-
-    if len(context_blocks) < 8:
-        try:
-            gh_results = await wc.github_search_code(req.message, deps.GITHUB_TOKEN, max_results=3)
-            for g in gh_results:
-                text, dl_url = await wc.github_fetch_file_text(g.get("api_url"), deps.GITHUB_TOKEN)
-                title = f"GitHub: {g.get('repository_full_name')}/{g.get('path')}"
-                sources.append(Source(title=title, url=dl_url or g.get("html_url")))
-                if text:
-                    context_blocks.append(text)
-                if len(context_blocks) >= 8:
-                    break
-        except Exception:
-            pass
-
-    system_prompt = (
-        "You are ICLeaF LMS's cloud-mode assistant. "
-        f"User role: {req.role}. Provide concise, correct answers. "
-        "If context is provided, cite sources with [1], [2], ... matching the source list. "
-        "If you're unsure, say so."
-    )
-    ctx = "\n\n".join([f"[Source {i+1}]\n{b}" for i, b in enumerate(context_blocks)]) if context_blocks else ""
-    messages: List[dict] = [{"role": "system", "content": system_prompt}]
-    if ctx:
-        messages.append({"role": "system", "content": f"Context for grounding:\n{ctx}"})
-    for m in req.history:
-        assert isinstance(m, Message)
-        messages.append(m.model_dump())
-    messages.append({"role": "user", "content": req.message})
-
-    if client is None:
-        answer = "LLM not configured (missing OPENAI_API_KEY)."
-    else:
-        completion = client.chat.completions.create(
-            model=deps.OPENAI_MODEL,
-            messages=messages,
-            temperature=0.2,
-        )
-        answer = completion.choices[0].message.content
-
-    return ChatResponse(answer=answer, sources=sources)
+# Chat functionality is now handled by api_router at /api/chatbot/query
