@@ -35,16 +35,21 @@ def embed_text(text: str, model: str = None) -> Optional[List[float]]:
         return None
 
 def process_document_content(content: str, doc_name: str, chunk_size: int = 1000, overlap: int = 200) -> List[Dict[str, Any]]:
-    """Process document content into chunks with embeddings."""
+    """Process document content into chunks with embeddings using token-based chunking."""
     if not content.strip():
         return []
     
-    # Split content into chunks
+    # Split content into chunks using token-based approach
     chunks = []
     words = content.split()
     
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk_words = words[i:i + chunk_size]
+    # Approximate token count (roughly 1.3 tokens per word for English)
+    tokens_per_word = 1.3
+    token_chunk_size = int(chunk_size / tokens_per_word)
+    token_overlap = int(overlap / tokens_per_word)
+    
+    for i in range(0, len(words), token_chunk_size - token_overlap):
+        chunk_words = words[i:i + token_chunk_size]
         chunk_text = " ".join(chunk_words)
         
         if len(chunk_text.strip()) < 50:  # Skip very short chunks
@@ -62,7 +67,8 @@ def process_document_content(content: str, doc_name: str, chunk_size: int = 1000
             "metadata": {
                 "chunk_index": len(chunks),
                 "doc_name": doc_name,
-                "chunk_size": len(chunk_text)
+                "chunk_size": len(chunk_text),
+                "estimated_tokens": int(len(chunk_text.split()) * tokens_per_word)
             }
         })
     

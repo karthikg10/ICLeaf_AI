@@ -213,10 +213,12 @@ class AnalyticsRequest(BaseModel):
     group_by: str = "day"  # "day", "hour", "subject", "topic", "user"
 
 class AnalyticsResponse(BaseModel):
-    ok: bool
+    success: bool = Field(alias="ok")  # Support both "ok" and "success"
     metrics: AnalyticsMetrics
     period: dict
     generated_at: datetime = datetime.now()
+    
+    model_config = {"populate_by_name": True}
 
 # ----- Content Generation Models -----
 ContentType = Literal["pdf", "ppt", "flashcard", "quiz", "assessment", "video", "audio", "compiler"]
@@ -355,9 +357,12 @@ class SystemPerformance(BaseModel):
     uptime: float
 
 class EnhancedAnalyticsResponse(BaseModel):
+    success: bool = Field(alias="ok")  # Support both "ok" and "success"
     period: dict
     tokenUsage: TokenUsage
     userEngagement: UserEngagement
     topSubjects: List[TopSubject]
     systemPerformance: SystemPerformance
+    
+    model_config = {"populate_by_name": True}
 

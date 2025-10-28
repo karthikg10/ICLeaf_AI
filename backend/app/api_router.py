@@ -183,14 +183,7 @@ async def chatbot_query(req: ChatRequest = Body(...)):
         )
         return result
     except asyncio.TimeoutError:
-        return ChatResponse(
-            success=False,
-            response="Request timeout: Processing took longer than 10 seconds. Please try again with a simpler query.",
-            sources=[],
-            sessionId=req.sessionId,
-            timestamp=datetime.now().isoformat(),
-            mode=req.mode
-        )
+        raise HTTPException(status_code=503, detail="Request timeout: Processing took longer than 10 seconds. Please try again with a simpler query.")
 
 async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatResponse:
     """Process the chatbot query with proper error handling."""
@@ -872,6 +865,7 @@ def get_analytics(
         # Return empty analytics on error
         from .models import TokenUsage, UserEngagement, TopSubject, SystemPerformance, EnhancedAnalyticsResponse
         return EnhancedAnalyticsResponse(
+            success=False,
             period={"fromDate": None, "toDate": None},
             tokenUsage=TokenUsage(internalMode=0, externalMode=0, totalCost=0.0),
             userEngagement=UserEngagement(totalQueries=0, avgSessionDuration=0.0, messagesPerSession=0.0, activeUsers=0),
@@ -926,14 +920,7 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
         )
         return result
     except asyncio.TimeoutError:
-        return GenerateContentResponse(
-            success=False,
-            contentId="",
-            userId=request.userId,
-            status="failed",
-            message=f"Content generation timeout: Processing took longer than {sla_timeout} seconds. Please try again with simpler content.",
-            etaSeconds=sla_timeout
-        )
+        raise HTTPException(status_code=503, detail=f"Content generation timeout: Processing took longer than {sla_timeout} seconds. Please try again with simpler content.")
 
 async def _process_content_generation(request: GenerateContentRequest, start_time: float) -> GenerateContentResponse:
     try:
@@ -1087,7 +1074,7 @@ def list_content(
         )
 
 @api_router.get("/content/download/{contentId}")
-def download_content(contentId: str):
+def download_content(contentId: str, request: Request):
     """
     Download generated content by content ID.
     Returns the actual file for media content or metadata for other content.
@@ -1102,6 +1089,10 @@ def download_content(contentId: str):
         
         if not content.filePath or not os.path.exists(content.filePath):
             raise HTTPException(status_code=404, detail="Content file not found")
+        
+        # Track download for analytics
+        client_ip = request.client.host if request.client else "unknown"
+        content_manager.track_download(contentId, content.userId, client_ip)
         
         # For media files (audio/video), return the actual file
         if content.contentType in ["audio", "video"]:
@@ -1196,6 +1187,28 @@ def get_content_info(contentId: str):
             contentType="",
             message=f"Error getting content info: {str(e)}"
         )
+
+@api_router.get("/content/{contentId}/downloads")
+def get_content_downloads(contentId: str):
+    """
+    Get download statistics for a content item.
+    """
+    try:
+        content = content_manager.get_content(contentId)
+        if not content:
+            raise HTTPException(status_code=404, detail="Content not found")
+        
+        download_stats = content_manager.get_download_stats(contentId)
+        return {
+            "success": True,
+            "contentId": contentId,
+            "downloadStats": download_stats
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting download stats: {str(e)}")
 
 @api_router.get("/content/{contentId}/status")
 def get_content_status(contentId: str):

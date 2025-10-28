@@ -31,6 +31,9 @@ from openai import OpenAI
 # In-memory content storage (in production, use database)
 _content_storage: Dict[str, GeneratedContent] = {}
 
+# Download tracking (in production, use database)
+_download_tracking: Dict[str, List[Dict]] = {}  # contentId -> [{"timestamp": ..., "userId": ..., "ip": ...}]
+
 # Content generation client
 content_client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else None
 
@@ -1461,6 +1464,26 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
 def get_all_content() -> List[GeneratedContent]:
     """Get all content (for debugging/admin purposes)."""
     return list(_content_storage.values())
+
+def track_download(content_id: str, user_id: str, ip_address: str = None) -> None:
+    """Track a download event for analytics."""
+    if content_id not in _download_tracking:
+        _download_tracking[content_id] = []
+    
+    _download_tracking[content_id].append({
+        "timestamp": datetime.now().isoformat(),
+        "userId": user_id,
+        "ip": ip_address
+    })
+
+def get_download_stats(content_id: str) -> Dict:
+    """Get download statistics for a content item."""
+    downloads = _download_tracking.get(content_id, [])
+    return {
+        "total_downloads": len(downloads),
+        "downloads": downloads,
+        "last_downloaded": downloads[-1]["timestamp"] if downloads else None
+    }
 
 def clear_content() -> None:
     """Clear all content (for testing purposes)."""

@@ -1,0 +1,4 @@
+S.No.,QUESTION,CORRECT ANSWER,ANSWER DESC,ANSWER 1,ANSWER 2,ANSWER 3,ANSWER 4
+1,What is the time complexity of binary search?,1,"Binary search operates in logarithmic time, making it efficient for sorted arrays.",O(log n),O(n),O(n log n),O(1)
+2,Which algorithm is used to find the shortest path in a graph?,2,Dijkstra's algorithm is commonly used for finding the shortest paths from a source vertex to all other vertices in a weighted graph.,Bubble Sort,Dijkstra's Algorithm,Merge Sort,Quick Sort
+3,What is the worst-case time complexity of quicksort?,3,"In the worst case, quicksort can degrade to O(n^2) when the pivot selection is poor.",O(n),O(n log n),O(n^2),O(log n)
