@@ -5,7 +5,7 @@ import json
 import asyncio
 import shutil
 import requests
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
@@ -13,6 +13,8 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from pptx import Presentation
 from pptx.util import Inches, Pt
+import csv
+import xlsxwriter
 import re
 from .models import (
     GeneratedContent, GenerateContentRequest,
@@ -20,7 +22,7 @@ from .models import (
     AssessmentConfig, VideoConfig, AudioConfig, CompilerConfig,
     PDFConfig, PPTConfig
 )
-from . import rag_store_simple as rag
+from . import rag_store_chromadb as rag
 from . import web_cloud as wc
 from . import deps
 from . import media_generator
@@ -335,21 +337,36 @@ def update_content_status(content_id: str, status: ContentStatus, file_path: str
             content.completedAt = datetime.now()
 
 async def generate_flashcard_content(request: GenerateContentRequest, config: FlashcardConfig) -> str:
-    """Generate flashcard content."""
+    """Generate flashcard content in a clean table format."""
+    print(f"[DEBUG] generate_flashcard_content called with config: {config}")
+    print(f"[DEBUG] config type: {type(config)}")
+    print(f"[DEBUG] config.front: {config.front}")
+    
     if not content_client:
         raise Exception("OpenAI client not configured")
     
-    system_prompt = f"""You are an educational content generator. Create a flashcard with the following specifications:
-- Front: {config.front}
-- Back: {config.back}
+    system_prompt = f"""You are an educational content generator. Create flashcards in a clean table format with the following specifications:
+- Create 5-8 flashcards based on the topic
+- Each flashcard should have a KEY (term/concept) and Description (explanation)
+- Format as a clean table with two columns: KEY and Description
 - Difficulty: {config.difficulty}
+- User role: {request.role}
 
-Generate educational content that matches the user's role: {request.role}"""
+Format the output as a clean table like this:
+| KEY | Description |
+|-----|-------------|
+| Term 1 | Clear explanation of term 1 |
+| Term 2 | Clear explanation of term 2 |
+| Term 3 | Clear explanation of term 3 |
+
+Make sure the table is well-structured and easy to read."""
     
-    user_prompt = f"""Create a flashcard based on: {request.prompt}
+    user_prompt = f"""Create flashcards based on: {request.prompt}
 Front: {config.front}
 Back: {config.back}
-Difficulty: {config.difficulty}"""
+Difficulty: {config.difficulty}
+
+Generate 5-8 flashcards in a clean table format with KEY and Description columns."""
     
     response = content_client.chat.completions.create(
         model=deps.OPENAI_MODEL,
@@ -362,21 +379,90 @@ Difficulty: {config.difficulty}"""
     
     return response.choices[0].message.content
 
+def _parse_markdown_table_to_rows(table_text: str) -> List[Tuple[str, str]]:
+    """Parse a markdown table with two columns (KEY, Description) into rows.
+
+    The function tolerates leading/trailing spaces, header/separator lines,
+    and extra columns by taking the first two.
+    """
+    rows: List[Tuple[str, str]] = []
+    lines = [ln.strip() for ln in table_text.splitlines() if ln.strip()]
+    for ln in lines:
+        if '|' not in ln:
+            continue
+        # Skip markdown separator rows like: |-----|------|
+        if set(ln.replace('|', '').replace(' ', '').replace(':', '')) <= {'-',}:
+            continue
+        parts = [p.strip() for p in ln.split('|')]
+        # Typical markdown rows start and end with '|', remove empties created by split
+        parts = [p for p in parts if p != '']
+        if len(parts) < 2:
+            continue
+        # Skip a possible header row if it looks like headers
+        if parts[0].lower() in ("key", "term") and parts[1].lower().startswith("description"):
+            continue
+        key_col, desc_col = parts[0], parts[1]
+        if key_col and desc_col:
+            rows.append((key_col, desc_col))
+    return rows
+
+def _write_flashcards_csv_xlsx(storage_path: str, rows: List[Tuple[str, str]]) -> Tuple[str, str]:
+    """Write flashcards to CSV and XLSX files. Returns (csv_path, xlsx_path)."""
+    csv_path = os.path.join(storage_path, "flashcards.csv")
+    xlsx_path = os.path.join(storage_path, "flashcards.xlsx")
+
+    # CSV
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(["KEY", "Description"])
+        for k, d in rows:
+            writer.writerow([k, d])
+
+    # XLSX
+    workbook = xlsxwriter.Workbook(xlsx_path)
+    worksheet = workbook.add_worksheet("Flashcards")
+    header_fmt = workbook.add_format({"bold": True})
+    worksheet.write(0, 0, "KEY", header_fmt)
+    worksheet.write(0, 1, "Description", header_fmt)
+    for idx, (k, d) in enumerate(rows, start=1):
+        worksheet.write(idx, 0, k)
+        worksheet.write(idx, 1, d)
+    # Make columns a bit wider
+    worksheet.set_column(0, 0, 28)
+    worksheet.set_column(1, 1, 80)
+    workbook.close()
+
+    return csv_path, xlsx_path
+
 async def generate_quiz_content(request: GenerateContentRequest, config: QuizConfig) -> str:
-    """Generate quiz content."""
+    """Generate quiz content in a structured table format."""
     if not content_client:
         raise Exception("OpenAI client not configured")
     
-    system_prompt = f"""You are an educational quiz generator. Create a quiz with the following specifications:
+    system_prompt = f"""You are an educational quiz generator. Create a quiz in a structured table format with the following specifications:
 - Number of questions: {config.num_questions}
 - Difficulty: {config.difficulty}
 - Question types: {', '.join(config.question_types)}
-- User role: {request.role}"""
+- User role: {request.role}
+
+Format the output as a structured table with these columns:
+| S.No. | QUESTION | CORRECT ANSWER | ANSWER DESC | ANSWER 1 | ANSWER 2 | ANSWER 3 | ANSWER 4 |
+
+Where:
+- S.No.: Serial number (1, 2, 3, etc.)
+- QUESTION: The quiz question
+- CORRECT ANSWER: The number (1, 2, 3, or 4) indicating which answer is correct
+- ANSWER DESC: Brief explanation of why the correct answer is right
+- ANSWER 1-4: Four multiple choice options
+
+Make sure each question has exactly 4 answer choices and the correct answer number corresponds to one of them."""
     
     user_prompt = f"""Create a quiz based on: {request.prompt}
 Number of questions: {config.num_questions}
 Difficulty: {config.difficulty}
-Question types: {', '.join(config.question_types)}"""
+Question types: {', '.join(config.question_types)}
+
+Generate the quiz in the exact table format specified above."""
     
     response = content_client.chat.completions.create(
         model=deps.OPENAI_MODEL,
@@ -388,6 +474,95 @@ Question types: {', '.join(config.question_types)}"""
     )
     
     return response.choices[0].message.content
+
+async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfig) -> List[Dict[str, str]]:
+    """Generate quiz rows suitable for CSV/XLSX export.
+
+    Schema columns (logical keys):
+    s_no, question, correct_answer, answer_desc, answer_1, answer_2, answer_3, answer_4
+    """
+    if not content_client:
+        raise Exception("OpenAI client not configured")
+
+    keys = [
+        "s_no","question","correct_answer","answer_desc","answer_1","answer_2","answer_3","answer_4"
+    ]
+
+    system_prompt = (
+        "You generate quiz rows for CSV/XLSX export. Return ONLY JSON array (no markdown) "
+        "with objects using EXACT keys: " + ",".join(keys) + ". "
+        "'s_no' starts at 1 and increments. 'correct_answer' is 1-4. "
+        f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}."
+    )
+
+    user_prompt = (
+        f"Create quiz rows for: {request.prompt}. Keep questions concise and unambiguous."
+    )
+
+    response = content_client.chat.completions.create(
+        model=deps.OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+    )
+
+    txt = response.choices[0].message.content.strip()
+    try:
+        data = json.loads(txt)
+        if not isinstance(data, list):
+            raise ValueError("expected list")
+    except Exception:
+        data = []
+
+    rows: List[Dict[str, str]] = []
+    for row in data:
+        norm = {k: str(row.get(k, "")) for k in keys}
+        rows.append(norm)
+    return rows
+
+def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, str]]) -> Tuple[str, str]:
+    """Write quiz rows to CSV/XLSX with the specified headers order."""
+    headers = [
+        "S.No.", "QUESTION", "CORRECT ANSWER", "ANSWER DESC",
+        "ANSWER 1", "ANSWER 2", "ANSWER 3", "ANSWER 4"
+    ]
+    key_map = {
+        "S.No.": "s_no",
+        "QUESTION": "question",
+        "CORRECT ANSWER": "correct_answer",
+        "ANSWER DESC": "answer_desc",
+        "ANSWER 1": "answer_1",
+        "ANSWER 2": "answer_2",
+        "ANSWER 3": "answer_3",
+        "ANSWER 4": "answer_4",
+    }
+
+    csv_path = os.path.join(storage_path, "quiz.csv")
+    xlsx_path = os.path.join(storage_path, "quiz.xlsx")
+
+    # CSV
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        for r in rows:
+            writer.writerow([r.get(key_map[h], "") for h in headers])
+
+    # XLSX
+    workbook = xlsxwriter.Workbook(xlsx_path)
+    ws = workbook.add_worksheet("Quiz")
+    header_fmt = workbook.add_format({"bold": True})
+    for col, h in enumerate(headers):
+        ws.write(0, col, h, header_fmt)
+    for row_idx, r in enumerate(rows, start=1):
+        for col, h in enumerate(headers):
+            ws.write(row_idx, col, r.get(key_map[h], ""))
+    ws.set_row(0, 18)
+    ws.set_column(0, len(headers)-1, 22)
+    workbook.close()
+
+    return csv_path, xlsx_path
 
 async def generate_assessment_content(request: GenerateContentRequest, config: AssessmentConfig) -> str:
     """Generate assessment content."""
@@ -417,6 +592,108 @@ Passing score: {config.passing_score}%"""
     )
     
     return response.choices[0].message.content
+
+async def generate_assessment_table(request: GenerateContentRequest, config: AssessmentConfig) -> List[Dict[str, str]]:
+    """Generate assessment in a structured row schema suitable for XLSX/CSV.
+
+    Schema columns:
+    subject, topic, type, question, answer_description, levels, total_options,
+    choice_answer_one, choice_answer_two, choice_answer_three, choice_answer_four,
+    choice_answer_five, correct_answers, tag1, tag2, tag3
+    """
+    if not content_client:
+        raise Exception("OpenAI client not configured")
+
+    columns = [
+        "subject","topic","type","question","answer_description","levels","total_options",
+        "choice_answer_one","choice_answer_two","choice_answer_three","choice_answer_four","choice_answer_five",
+        "correct_answers","tag1","tag2","tag3"
+    ]
+
+    system_prompt = (
+        "You create assessment rows for export to CSV/XLSX. "
+        "Return ONLY valid JSON array (no markdown) of objects with EXACTLY these keys: "
+        + ",".join(columns) + ". "
+        "The 'type' is one of: Choice, FillUp, Match. "
+        "'levels' is one of: Easy, Medium, Difficult. "
+        "'total_options' is 3-5 for Choice, 1 for FillUp/Match. "
+        "For 'correct_answers', provide comma-separated indices like '1' or '1,3'. "
+        "When type is FillUp, put the correct answer in choice_answer_one and set total_options to 1. "
+        "When type is Match, put pairs in choice_answer_one..five like 'a=apple'. "
+    )
+
+    user_prompt = (
+        f"Create 4 assessment rows for: {request.prompt}\n"
+        f"Subject: {request.subjectName or ''}\n"
+        f"Topic: {request.topicName or ''}\n"
+        f"Duration: {config.duration_minutes} minutes. Difficulty: {config.difficulty}. "
+        f"Question types: {', '.join(config.question_types)}. "
+        "Use concise wording for questions and answers."
+    )
+
+    response = content_client.chat.completions.create(
+        model=deps.OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.4,
+    )
+
+    txt = response.choices[0].message.content.strip()
+    try:
+        data = json.loads(txt)
+        if not isinstance(data, list):
+            raise ValueError("expected list")
+    except Exception:
+        # Fallback: return empty list to avoid crash
+        data = []
+    # Normalize rows to include all columns
+    norm_rows: List[Dict[str, str]] = []
+    for row in data:
+        norm = {k: str(row.get(k, "")) for k in columns}
+        norm_rows.append(norm)
+    return norm_rows
+
+def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]]) -> Tuple[str, str]:
+    """Write assessment rows to CSV and XLSX. Returns (csv_path, xlsx_path)."""
+    headers = [
+        "subject","topic","type","question","answer description","levels","total options",
+        "Choice Answer One","Choice Answer Two","Choice Answer Three","Choice Answer Four","Choice Answer Five",
+        "correct answers","TAG1","TAG2","TAG3"
+    ]
+    key_map = {
+        "subject":"subject","topic":"topic","type":"type","question":"question",
+        "answer description":"answer_description","levels":"levels","total options":"total_options",
+        "Choice Answer One":"choice_answer_one","Choice Answer Two":"choice_answer_two",
+        "Choice Answer Three":"choice_answer_three","Choice Answer Four":"choice_answer_four",
+        "Choice Answer Five":"choice_answer_five","correct answers":"correct_answers",
+        "TAG1":"tag1","TAG2":"tag2","TAG3":"tag3",
+    }
+    csv_path = os.path.join(storage_path, "assessment.csv")
+    xlsx_path = os.path.join(storage_path, "assessment.xlsx")
+
+    # CSV
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        for r in rows:
+            writer.writerow([r.get(key_map[h], "") for h in headers])
+
+    # XLSX
+    workbook = xlsxwriter.Workbook(xlsx_path)
+    ws = workbook.add_worksheet("Assessment")
+    header_fmt = workbook.add_format({"bold": True})
+    for col, h in enumerate(headers):
+        ws.write(0, col, h, header_fmt)
+    for row_idx, r in enumerate(rows, start=1):
+        for col, h in enumerate(headers):
+            ws.write(row_idx, col, r.get(key_map[h], ""))
+    ws.set_row(0, 18)
+    ws.set_column(0, len(headers)-1, 18)
+    workbook.close()
+
+    return csv_path, xlsx_path
 
 async def generate_video_content(request: GenerateContentRequest, config: VideoConfig, content_id: str) -> str:
     """Generate actual video file using AI video generation."""
@@ -873,19 +1150,34 @@ IMPORTANT: Keep all content SHORT and CONCISE to prevent overflow."""
     return ppt_path
 
 async def generate_quiz_pdf_content(request: GenerateContentRequest, quiz_config: QuizConfig) -> str:
-    """Generate quiz content as PDF."""
+    """Generate quiz content as PDF in structured table format."""
     if not content_client:
         raise Exception("OpenAI client not configured")
     
-    system_prompt = f"""You are a quiz generator. Create a structured quiz with {quiz_config.num_questions} questions.
-User role: {request.role}
-Mode: {request.mode}
-Difficulty: {quiz_config.difficulty}"""
+    system_prompt = f"""You are an educational quiz generator. Create a quiz in a structured table format with the following specifications:
+- Number of questions: {quiz_config.num_questions}
+- Difficulty: {quiz_config.difficulty}
+- Question types: {', '.join(quiz_config.question_types)}
+- User role: {request.role}
+
+Format the output as a structured table with these columns:
+| S.No. | QUESTION | CORRECT ANSWER | ANSWER DESC | ANSWER 1 | ANSWER 2 | ANSWER 3 | ANSWER 4 |
+
+Where:
+- S.No.: Serial number (1, 2, 3, etc.)
+- QUESTION: The quiz question
+- CORRECT ANSWER: The number (1, 2, 3, or 4) indicating which answer is correct
+- ANSWER DESC: Brief explanation of why the correct answer is right
+- ANSWER 1-4: Four multiple choice options
+
+Make sure each question has exactly 4 answer choices and the correct answer number corresponds to one of them."""
     
     user_prompt = f"""Create a quiz based on: {request.prompt}
 Number of questions: {quiz_config.num_questions}
 Difficulty: {quiz_config.difficulty}
-Question types: {', '.join(quiz_config.question_types)}"""
+Question types: {', '.join(quiz_config.question_types)}
+
+Generate the quiz in the exact table format specified above."""
     
     response = content_client.chat.completions.create(
         model=deps.OPENAI_MODEL,
@@ -1071,22 +1363,46 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         generated_content = ""
         
         if request.contentType == "flashcard" and request.contentConfig.get('flashcard'):
-            flashcard_config = request.contentConfig.get('flashcard')
+            flashcard_config_dict = request.contentConfig.get('flashcard')
+            print(f"[DEBUG] Flashcard config dict: {flashcard_config_dict}")
+            # Create FlashcardConfig object manually
+            flashcard_config = FlashcardConfig(
+                front=flashcard_config_dict.get('front', ''),
+                back=flashcard_config_dict.get('back', ''),
+                difficulty=flashcard_config_dict.get('difficulty', 'medium')
+            )
+            print(f"[DEBUG] Flashcard config object: {flashcard_config}")
             generated_content = await generate_flashcard_content(request, flashcard_config)
         elif request.contentType == "quiz" and request.contentConfig.get('quiz'):
-            quiz_config = request.contentConfig.get('quiz')
-            generated_content = await generate_quiz_pdf_content(request, quiz_config)
+            quiz_config_dict = request.contentConfig.get('quiz')
+            # Create QuizConfig object manually
+            quiz_config = QuizConfig(
+                num_questions=quiz_config_dict.get('num_questions', 5),
+                difficulty=quiz_config_dict.get('difficulty', 'medium'),
+                question_types=quiz_config_dict.get('question_types', ['multiple_choice'])
+            )
+            rows = await generate_quiz_table(request, quiz_config)
+            csv_path, xlsx_path = _write_quiz_csv_xlsx(storage_path, rows)
+            generated_content = xlsx_path
         elif request.contentType == "assessment" and request.contentConfig.get('assessment'):
-            assessment_config = request.contentConfig.get('assessment')
-            generated_content = await generate_assessment_pdf_content(request, assessment_config)
+            assessment_config_dict = request.contentConfig.get('assessment')
+            assessment_config = AssessmentConfig(**assessment_config_dict)
+            # Generate table-structured rows and export CSV/XLSX
+            rows = await generate_assessment_table(request, assessment_config)
+            csv_path, xlsx_path = _write_assessment_csv_xlsx(storage_path, rows)
+            # Also create a PDF fallback if needed later; for now, prefer XLSX path
+            generated_content = xlsx_path
         elif request.contentType == "video" and request.contentConfig.get('video'):
-            video_config = request.contentConfig.get('video')
+            video_config_dict = request.contentConfig.get('video')
+            video_config = VideoConfig(**video_config_dict)
             generated_content = await generate_video_content(request, video_config, content_id)
         elif request.contentType == "audio" and request.contentConfig.get('audio'):
-            audio_config = request.contentConfig.get('audio')
+            audio_config_dict = request.contentConfig.get('audio')
+            audio_config = AudioConfig(**audio_config_dict)
             generated_content = await generate_audio_content(request, audio_config, content_id)
         elif request.contentType == "compiler" and request.contentConfig.get('compiler'):
-            compiler_config = request.contentConfig.get('compiler')
+            compiler_config_dict = request.contentConfig.get('compiler')
+            compiler_config = CompilerConfig(**compiler_config_dict)
             generated_content = await generate_compiler_content(request, compiler_config)
         elif request.contentType == "pdf":
             generated_content = await generate_pdf_content(request)
@@ -1110,15 +1426,23 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             file_path = os.path.join(storage_path, f"content{file_extension}")
             
             if request.contentType in ["flashcard"]:
-                # Save as JSON for structured content
+                # Parse markdown table to rows and write CSV/XLSX alongside JSON
+                rows = _parse_markdown_table_to_rows(generated_content)
+                csv_path, xlsx_path = _write_flashcards_csv_xlsx(storage_path, rows)
+
                 content_data = {
                     "type": request.contentType,
-                    "content": generated_content,
+                    "table_markdown": generated_content,
+                    "rows": [{"KEY": k, "Description": d} for k, d in rows],
+                    "csv_path": csv_path,
+                    "xlsx_path": xlsx_path,
                     "config": request.contentConfig,
                     "metadata": content.metadata
                 }
                 with open(file_path, 'w', encoding='utf-8') as f:
                     json.dump(content_data, f, indent=2, default=str)
+                # Prefer CSV as primary downloadable artifact
+                file_path = csv_path
             else:
                 # Save as text
                 with open(file_path, 'w', encoding='utf-8') as f:

@@ -1,4 +1,6 @@
 # backend/app/api_router.py
+import asyncio
+import time
 from fastapi import APIRouter, Body, HTTPException, Query, Request, File, UploadFile, Form
 from fastapi.responses import FileResponse
 from fastapi_limiter import FastAPILimiter
@@ -11,9 +13,10 @@ from .models import (
     EmbedRequest, EmbedResponse, IngestFileRequest, IngestDirRequest,
     Conversation, HistoryRequest, HistoryResponse, AnalyticsRequest, AnalyticsResponse,
     GenerateContentRequest, GenerateContentResponse, ContentListResponse, ContentDownloadResponse,
-    TokenUsage, UserEngagement, TopSubject, SystemPerformance, EnhancedAnalyticsResponse
+    TokenUsage, UserEngagement, TopSubject, SystemPerformance, EnhancedAnalyticsResponse,
+    PaginationInfo
 )
-from . import rag_store_simple as rag
+from . import rag_store_chromadb as rag
 from . import web_cloud as wc
 from . import deps
 from . import session_manager
@@ -21,12 +24,16 @@ from . import embedding_service
 from . import conversation_manager
 from .content_manager import clean_markdown_formatting
 from . import content_manager
+from .cleanup_service import cleanup_service
 from openai import OpenAI
 import time
 import os
 
-# Initialize API router with prefix and tags
-api_router = APIRouter(prefix="/api", tags=["ICLeaF AI"])
+# Initialize API router with tags (prefix handled in main.py)
+api_router = APIRouter(tags=["ICLeaF AI"])
+
+# Concurrency control for uploads (max 5 concurrent as per spec)
+upload_semaphore = asyncio.Semaphore(5)
 
 # LLM client
 client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else None
@@ -123,7 +130,7 @@ def internal_search(
     """
     Enhanced internal search with metadata filtering.
     """
-    hits = rag.query(q, top_k=top_k)
+    hits = rag.query(q, top_k=min(top_k, 5), min_similarity=0.1)
     results = []
     
     for h in hits:
@@ -164,8 +171,29 @@ def internal_search(
 async def chatbot_query(req: ChatRequest = Body(...)):
     """
     Main chatbot endpoint that handles both internal and cloud modes.
+    Enforces 10-second timeout as per API spec.
     """
     start_time = time.time()
+    
+    try:
+        # Wrap the entire processing in a 10-second timeout
+        result = await asyncio.wait_for(
+            _process_chatbot_query(req, start_time),
+            timeout=10.0
+        )
+        return result
+    except asyncio.TimeoutError:
+        return ChatResponse(
+            success=False,
+            response="Request timeout: Processing took longer than 10 seconds. Please try again with a simpler query.",
+            sources=[],
+            sessionId=req.sessionId,
+            timestamp=datetime.now().isoformat(),
+            mode=req.mode
+        )
+
+async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatResponse:
+    """Process the chatbot query with proper error handling."""
     sources: List[Source] = []
     context_blocks: List[str] = []
 
@@ -181,7 +209,9 @@ async def chatbot_query(req: ChatRequest = Body(...)):
 
     # INTERNAL (RAG) mode
     if req.mode == "internal":
-        hits = rag.query(req.message, top_k=req.top_k)
+        # Use enhanced RAG with cosine similarity threshold >= 0.1 and top-5 enforcement
+        hits = rag.query(req.message, top_k=min(req.top_k, 5), min_similarity=0.1)
+        
         for i, h in enumerate(hits):
             meta = h.get("meta", {})
             chunk_id = f"chunk_{i}_{meta.get('filename', 'unknown')}"
@@ -197,7 +227,12 @@ async def chatbot_query(req: ChatRequest = Body(...)):
                     relevanceScore=relevance_score
                 )
             )
-            context_blocks.append(h["text"])
+            
+            # Get text content - try multiple possible field names
+            text_content = h.get("text", "") or h.get("snippet", "") or h.get("document", "") or h.get("content", "")
+            
+            if text_content and len(text_content.strip()) > 5:  # Lower threshold
+                context_blocks.append(text_content)
 
         system_prompt = (
             "You are ICLeaF LMS's internal-mode assistant. "
@@ -496,7 +531,7 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
             
             if not chunks:
                 return EmbedResponse(
-                    ok=False,
+                    success=False,
                     subjectId=req.subjectId,
                     topicId=req.topicId,
                     docName=req.docName,
@@ -529,7 +564,7 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
             )
         else:
             return EmbedResponse(
-                ok=False,
+                success=False,
                 subjectId=req.subjectId,
                 topicId=req.topicId,
                 docName=req.docName,
@@ -572,45 +607,61 @@ async def upload_file(
 ):
     """
     Upload and ingest a single file into the knowledge base.
+    Enforces file size limit of 50MB and concurrency limit of 5 as per API spec.
     """
-    try:
-        # Create uploads directory if it doesn't exist
-        uploads_dir = "./data/uploads"
-        os.makedirs(uploads_dir, exist_ok=True)
-        
-        # Save uploaded file
-        file_path = os.path.join(uploads_dir, file.filename)
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-        
-        # Process the file
-        result = embedding_service.embed_single_file(
-            file_path,
-            subjectId,
-            topicId,
-            file.filename,
-            uploadedBy
-        )
-        
-        # Clean up uploaded file after processing
+    async with upload_semaphore:  # Limit concurrent uploads to 5
         try:
-            os.remove(file_path)
-        except:
-            pass  # Ignore cleanup errors
+            # Check file size (50MB limit as per spec)
+            MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB in bytes
+            content = await file.read()
             
-        return result
-        
-    except Exception as e:
-        return EmbedResponse(
-            ok=False,
-            subjectId=subjectId,
-            topicId=topicId,
-            docName=file.filename,
-            uploadedBy=uploadedBy,
-            chunks_processed=0,
-            message=f"Error uploading file: {str(e)}"
-        )
+            if len(content) > MAX_FILE_SIZE:
+                return EmbedResponse(
+                    success=False,
+                    subjectId=subjectId,
+                    topicId=topicId,
+                    docName=file.filename,
+                    uploadedBy=uploadedBy,
+                    chunks_processed=0,
+                    message=f"File too large: {len(content)} bytes. Maximum allowed: {MAX_FILE_SIZE} bytes (50MB)"
+                )
+            
+            # Create uploads directory if it doesn't exist
+            uploads_dir = "./data/uploads"
+            os.makedirs(uploads_dir, exist_ok=True)
+            
+            # Save uploaded file
+            file_path = os.path.join(uploads_dir, file.filename)
+            with open(file_path, "wb") as buffer:
+                buffer.write(content)
+            
+            # Process the file
+            result = embedding_service.embed_single_file(
+                file_path,
+                subjectId,
+                topicId,
+                file.filename,
+                uploadedBy
+            )
+            
+            # Clean up uploaded file after processing
+            try:
+                os.remove(file_path)
+            except:
+                pass  # Ignore cleanup errors
+                
+            return result
+            
+        except Exception as e:
+            return EmbedResponse(
+                success=False,
+                subjectId=subjectId,
+                topicId=topicId,
+                docName=file.filename,
+                uploadedBy=uploadedBy,
+                chunks_processed=0,
+                message=f"Error uploading file: {str(e)}"
+            )
 
 @api_router.post("/chatbot/knowledge/ingest-dir")
 def ingest_directory(req: IngestDirRequest = Body(...)):
@@ -636,8 +687,8 @@ def get_conversation_history(
     docName: str = Query(None),
     start_date: str = Query(None),
     end_date: str = Query(None),
-    limit: int = Query(100),
-    offset: int = Query(0)
+    page: int = Query(1),
+    limit: int = Query(20)
 ):
     """
     Get conversation history with filtering and pagination.
@@ -661,28 +712,26 @@ def get_conversation_history(
             docName=docName,
             start_date=start_dt,
             end_date=end_dt,
-            limit=limit,
-            offset=offset
+            page=page,
+            limit=limit
         )
         
         # Get filtered conversations
         conversations, total_count = conversation_manager.get_conversations(filters)
         
+        # Calculate pagination info
+        total_pages = (total_count + limit - 1) // limit  # Ceiling division
+        pagination = PaginationInfo(
+            currentPage=page,
+            totalPages=total_pages,
+            totalRecords=total_count,
+            recordsPerPage=limit
+        )
+        
         return HistoryResponse(
-            ok=True,
+            success=True,
             conversations=conversations,
-            total_count=total_count,
-            filters={
-                "sessionId": sessionId,
-                "userId": userId,
-                "subjectId": subjectId,
-                "topicId": topicId,
-                "docName": docName,
-                "start_date": start_date,
-                "end_date": end_date,
-                "limit": limit,
-                "offset": offset
-            },
+            pagination=pagination,
             message=f"Retrieved {len(conversations)} conversations out of {total_count} total"
         )
         
@@ -854,12 +903,44 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
     """
     Generate various types of content based on user specifications.
     Supports: pdf, ppt, flashcard, quiz, assessment, video, audio, compiler
+    Enforces SLA timeouts: PPT/PDF <60/90s, Audio <2m, Video <5m
     """
+    start_time = time.time()
+    
+    # Determine SLA timeout based on content type
+    sla_timeout = 60  # Default 60 seconds
+    if request.contentType in ["pdf"]:
+        sla_timeout = 90  # PDF: 90 seconds
+    elif request.contentType in ["ppt"]:
+        sla_timeout = 60  # PPT: 60 seconds
+    elif request.contentType in ["audio"]:
+        sla_timeout = 120  # Audio: 2 minutes
+    elif request.contentType in ["video"]:
+        sla_timeout = 300  # Video: 5 minutes
+    
+    try:
+        # Wrap content generation in SLA timeout
+        result = await asyncio.wait_for(
+            _process_content_generation(request, start_time),
+            timeout=sla_timeout
+        )
+        return result
+    except asyncio.TimeoutError:
+        return GenerateContentResponse(
+            success=False,
+            contentId="",
+            userId=request.userId,
+            status="failed",
+            message=f"Content generation timeout: Processing took longer than {sla_timeout} seconds. Please try again with simpler content.",
+            etaSeconds=sla_timeout
+        )
+
+async def _process_content_generation(request: GenerateContentRequest, start_time: float) -> GenerateContentResponse:
     try:
         # Validate content type and config
         if request.contentType == "flashcard" and not request.contentConfig.get('flashcard'):
             return GenerateContentResponse(
-                ok=False,
+                success=False,
                 contentId="",
                 userId=request.userId,
                 status="failed",
@@ -867,7 +948,7 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
             )
         elif request.contentType == "quiz" and not request.contentConfig.get('quiz'):
             return GenerateContentResponse(
-                ok=False,
+                success=False,
                 contentId="",
                 userId=request.userId,
                 status="failed",
@@ -875,7 +956,7 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
             )
         elif request.contentType == "assessment" and not request.contentConfig.get('assessment'):
             return GenerateContentResponse(
-                ok=False,
+                success=False,
                 contentId="",
                 userId=request.userId,
                 status="failed",
@@ -883,7 +964,7 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
             )
         elif request.contentType == "video" and not request.contentConfig.get('video'):
             return GenerateContentResponse(
-                ok=False,
+                success=False,
                 contentId="",
                 userId=request.userId,
                 status="failed",
@@ -891,7 +972,7 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
             )
         elif request.contentType == "audio" and not request.contentConfig.get('audio'):
             return GenerateContentResponse(
-                ok=False,
+                success=False,
                 contentId="",
                 userId=request.userId,
                 status="failed",
@@ -899,7 +980,7 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
             )
         elif request.contentType == "compiler" and not request.contentConfig.get('compiler'):
             return GenerateContentResponse(
-                ok=False,
+                success=False,
                 contentId="",
                 userId=request.userId,
                 status="failed",
@@ -907,7 +988,7 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
             )
         elif request.contentType == "pdf" and not request.contentConfig.get('pdf'):
             return GenerateContentResponse(
-                ok=False,
+                success=False,
                 contentId="",
                 userId=request.userId,
                 status="failed",
@@ -915,7 +996,7 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
             )
         elif request.contentType == "ppt" and not request.contentConfig.get('ppt'):
             return GenerateContentResponse(
-                ok=False,
+                success=False,
                 contentId="",
                 userId=request.userId,
                 status="failed",
@@ -938,17 +1019,17 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
         }.get(request.contentType, 60)
         
         return GenerateContentResponse(
-            ok=True,
+            success=True,
             contentId=content.contentId,
             userId=request.userId,
             status=content.status,
             message=f"Content generation started for {request.contentType}",
-            estimated_completion_time=estimated_time
+            etaSeconds=estimated_time
         )
         
     except Exception as e:
         return GenerateContentResponse(
-            ok=False,
+            success=False,
             contentId="",
             userId=request.userId,
             status="failed",
@@ -960,8 +1041,8 @@ def list_content(
     userId: str = Query(...),
     status: str = Query(None),
     contentType: str = Query(None),
-    limit: int = Query(100),
-    offset: int = Query(0)
+    page: int = Query(1),
+    limit: int = Query(20)
 ):
     """
     List generated content for a user with optional filtering.
@@ -976,22 +1057,32 @@ def list_content(
         if contentType:
             user_content = [c for c in user_content if c.contentType == contentType]
         
-        # Apply pagination
+        # Apply pagination (convert page/limit to offset/limit)
         total_count = len(user_content)
+        offset = (page - 1) * limit
         paginated_content = user_content[offset:offset + limit]
         
+        # Calculate pagination info
+        total_pages = (total_count + limit - 1) // limit  # Ceiling division
+        pagination = PaginationInfo(
+            currentPage=page,
+            totalPages=total_pages,
+            totalRecords=total_count,
+            recordsPerPage=limit
+        )
+        
         return ContentListResponse(
-            ok=True,
-            content=paginated_content,
-            total_count=total_count,
+            success=True,
+            contents=paginated_content,
+            pagination=pagination,
             userId=userId
         )
         
     except Exception as e:
         return ContentListResponse(
-            ok=False,
-            content=[],
-            total_count=0,
+            success=False,
+            contents=[],
+            pagination=PaginationInfo(currentPage=1, totalPages=0, totalRecords=0, recordsPerPage=limit),
             userId=userId
         )
 
@@ -1056,7 +1147,7 @@ def get_content_info(contentId: str):
         content = content_manager.get_content(contentId)
         if not content:
             return ContentDownloadResponse(
-                ok=False,
+                success=False,
                 contentId=contentId,
                 filePath="",
                 downloadUrl="",
@@ -1066,7 +1157,7 @@ def get_content_info(contentId: str):
         
         if content.status != "completed":
             return ContentDownloadResponse(
-                ok=False,
+                success=False,
                 contentId=contentId,
                 filePath="",
                 downloadUrl="",
@@ -1076,7 +1167,7 @@ def get_content_info(contentId: str):
         
         if not content.filePath or not os.path.exists(content.filePath):
             return ContentDownloadResponse(
-                ok=False,
+                success=False,
                 contentId=contentId,
                 filePath="",
                 downloadUrl="",
@@ -1137,6 +1228,23 @@ def get_content_status(contentId: str):
             "contentId": contentId,
             "status": "error",
             "message": str(e)
+        }
+
+@api_router.post("/admin/cleanup")
+async def trigger_cleanup():
+    """Manually trigger cleanup of old files (admin endpoint)."""
+    try:
+        await cleanup_service.cleanup_now()
+        return {
+            "success": True,
+            "message": "Cleanup completed successfully",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Cleanup failed: {str(e)}",
+            "timestamp": datetime.now().isoformat()
         }
 
 @api_router.get("/")

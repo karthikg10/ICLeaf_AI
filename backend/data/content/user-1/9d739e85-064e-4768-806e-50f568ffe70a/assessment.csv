@@ -1,0 +1,5 @@
+subject,topic,type,question,answer description,levels,total options,Choice Answer One,Choice Answer Two,Choice Answer Three,Choice Answer Four,Choice Answer Five,correct answers,TAG1,TAG2,TAG3
+Intro algorithms assessment,Sorting Algorithms,Choice,Which algorithm is the fastest for large datasets?,Consider the time complexity of sorting algorithms.,Medium,4,Quick Sort,Bubble Sort,Insertion Sort,Selection Sort,,1,algorithms,sorting,performance
+Intro algorithms assessment,Big O Notation,FillUp,The time complexity of binary search is _____,Fill in the correct time complexity.,Medium,1,O(log n),,,,,1,algorithms,complexity,big O
+Intro algorithms assessment,Algorithm Design,Match,Match the algorithm with its use case.,Pair each algorithm with its application.,Medium,5,a=Merge Sort,b=Pathfinding,c=Dynamic Programming,d=Graph Traversal,e=Searching,"1=a,2=b,3=c,4=d,5=e",algorithms,applications,matching
+Intro algorithms assessment,Data Structures,Choice,Which data structure uses LIFO?,Identify the data structure based on its access order.,Medium,3,Stack,Queue,Array,,,1,data structures,LIFO,stack

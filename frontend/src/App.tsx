@@ -5,14 +5,14 @@ import HistoryPage from "./components/HistoryPage";
 import AnalyticsPage from "./components/AnalyticsPage";
 import ContentPage from "./components/ContentPage";
 
-type Role = "Learner" | "Trainer" | "Admin";
-type Mode = "cloud" | "internal";
+type Role = "student" | "teacher" | "admin";
+type Mode = "internal" | "external";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8001";
 
 export default function App() {
-  const [role, setRole] = useState<Role>("Learner");
-  const [mode, setMode] = useState<Mode>("cloud");
+  const [role, setRole] = useState<Role>("student");
+  const [mode, setMode] = useState<Mode>("internal");
   const [activeTab, setActiveTab] = useState<"chat" | "upload" | "history" | "analytics" | "content">("chat");
 
   return (
@@ -42,9 +42,9 @@ export default function App() {
               onChange={(e) => setRole(e.target.value as Role)}
               style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc" }}
             >
-              <option value="Learner">Learner</option>
-              <option value="Trainer">Trainer</option>
-              <option value="Admin">Admin</option>
+              <option value="student">Student</option>
+              <option value="teacher">Teacher</option>
+              <option value="admin">Admin</option>
             </select>
           </label>
 
@@ -57,17 +57,17 @@ export default function App() {
             }}
           >
             <button
-              onClick={() => setMode("cloud")}
+              onClick={() => setMode("external")}
               style={{
                 padding: "8px 16px",
                 border: "none",
-                background: mode === "cloud" ? "#e8f1ff" : "transparent",
-                color: mode === "cloud" ? "#175cd3" : "#333",
+                background: mode === "external" ? "#e8f1ff" : "transparent",
+                color: mode === "external" ? "#175cd3" : "#333",
                 cursor: "pointer",
-                fontWeight: mode === "cloud" ? 600 : 400,
+                fontWeight: mode === "external" ? 600 : 400,
               }}
             >
-              Cloud
+              External
             </button>
             <button
               onClick={() => setMode("internal")}

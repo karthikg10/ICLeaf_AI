@@ -1,0 +1,9 @@
+KEY,Description
+Stack,"A data structure that follows the Last In, First Out (LIFO) principle, where the last element added is the first one to be removed."
+Queue,"A data structure that follows the First In, First Out (FIFO) principle, where the first element added is the first one to be removed."
+Push,The operation used to add an element to the top of a stack.
+Pop,The operation used to remove the top element from a stack.
+Enqueue,The operation used to add an element to the rear of a queue.
+Dequeue,The operation used to remove the front element from a queue.
+Peek,The operation that allows you to view the top element of a stack or the front element of a queue without removing it.
+Use Cases,"Stacks are often used in function call management, while queues are commonly used in scheduling tasks or handling requests."

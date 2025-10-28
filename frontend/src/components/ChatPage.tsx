@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
-type Role = "Learner" | "Trainer" | "Admin";
-type Mode = "cloud" | "internal";
+type Role = "student" | "teacher" | "admin";
+type Mode = "internal" | "external";
 
 type Source = {
   title: string;
@@ -13,10 +13,10 @@ type Source = {
 };
 
 type ChatResponse = {
+  success: boolean;
   answer: string;
   sources: Source[];
   sessionId: string;
-  userId: string;
   mode: Mode;
   timestamp: string;
 };
@@ -48,7 +48,7 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [sources, setSources] = useState<Source[]>([]);
+  const [, setSources] = useState<Source[]>([]);
 
   // Generate new session ID
   const generateNewSession = () => {
@@ -66,7 +66,8 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionId,
-          scope: "full" // Reset entire session
+          userId,
+          resetScope: "full" // Reset entire session
         }),
       });
       
@@ -318,8 +319,8 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
                     fontSize: 11,
                     padding: "2px 6px",
                     borderRadius: 12,
-                    background: message.mode === "cloud" ? "#e8f1ff" : "#e6f6ec",
-                    color: message.mode === "cloud" ? "#175cd3" : "#0a7a3d",
+                    background: message.mode === "external" ? "#e8f1ff" : "#e6f6ec",
+                    color: message.mode === "external" ? "#175cd3" : "#0a7a3d",
                     fontWeight: 500,
                   }}>
                     {message.mode}

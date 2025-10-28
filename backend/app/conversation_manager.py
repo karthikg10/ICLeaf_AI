@@ -61,8 +61,9 @@ def get_conversations(filters: HistoryRequest) -> Tuple[List[Conversation], int]
     
     total_count = len(filtered_conversations)
     
-    # Apply pagination
-    start_idx = filters.offset
+    # Apply pagination (convert page/limit to offset/limit)
+    offset = (filters.page - 1) * filters.limit
+    start_idx = offset
     end_idx = start_idx + filters.limit
     paginated_conversations = filtered_conversations[start_idx:end_idx]
     

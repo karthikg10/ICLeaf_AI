@@ -1,0 +1,16 @@
+{
+  "type": "flashcard",
+  "content": "| KEY                 | Description                                       |\n|---------------------|---------------------------------------------------|\n| Linked List         | A data structure that consists of a sequence of elements, each pointing to the next element in the sequence. |\n| Node                | The basic unit of a linked list, containing data and a reference (or pointer) to the next node. |\n| Head                | The first node in a linked list, which is used to access the entire list. |\n| Tail                | The last node in a linked list, which points to null (or None) indicating the end of the list. |\n| Singly Linked List  | A type of linked list where each node points to the next node in the sequence, allowing traversal in one direction. |\n| Doubly Linked List  | A type of linked list where each node has pointers to both the next and previous nodes, allowing traversal in both directions. |\n| Insertion           | The process of adding a new node to the linked list, which can occur at the head, tail, or any position in between. |\n| Deletion            | The process of removing a node from the linked list, which involves updating the pointers of adjacent nodes. |",
+  "config": {
+    "flashcard": {
+      "front": "Term",
+      "back": "Definition",
+      "difficulty": "easy"
+    }
+  },
+  "metadata": {
+    "docIds": null,
+    "subjectName": null,
+    "topicName": null
+  }
+}

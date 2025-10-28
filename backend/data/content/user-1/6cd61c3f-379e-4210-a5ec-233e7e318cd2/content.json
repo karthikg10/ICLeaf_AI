@@ -1,0 +1,52 @@
+{
+  "type": "flashcard",
+  "table_markdown": "| KEY            | Description                                           |\n|----------------|-------------------------------------------------------|\n| Stack          | A data structure that follows the Last In, First Out (LIFO) principle, where the last element added is the first one to be removed. |\n| Queue          | A data structure that follows the First In, First Out (FIFO) principle, where the first element added is the first one to be removed. |\n| Push           | The operation used to add an element to the top of a stack. |\n| Pop            | The operation used to remove the top element from a stack. |\n| Enqueue        | The operation used to add an element to the rear of a queue. |\n| Dequeue        | The operation used to remove the front element from a queue. |\n| Peek           | The operation that allows you to view the top element of a stack or the front element of a queue without removing it. |\n| Use Cases      | Stacks are often used in function call management, while queues are commonly used in scheduling tasks or handling requests. |",
+  "rows": [
+    {
+      "KEY": "Stack",
+      "Description": "A data structure that follows the Last In, First Out (LIFO) principle, where the last element added is the first one to be removed."
+    },
+    {
+      "KEY": "Queue",
+      "Description": "A data structure that follows the First In, First Out (FIFO) principle, where the first element added is the first one to be removed."
+    },
+    {
+      "KEY": "Push",
+      "Description": "The operation used to add an element to the top of a stack."
+    },
+    {
+      "KEY": "Pop",
+      "Description": "The operation used to remove the top element from a stack."
+    },
+    {
+      "KEY": "Enqueue",
+      "Description": "The operation used to add an element to the rear of a queue."
+    },
+    {
+      "KEY": "Dequeue",
+      "Description": "The operation used to remove the front element from a queue."
+    },
+    {
+      "KEY": "Peek",
+      "Description": "The operation that allows you to view the top element of a stack or the front element of a queue without removing it."
+    },
+    {
+      "KEY": "Use Cases",
+      "Description": "Stacks are often used in function call management, while queues are commonly used in scheduling tasks or handling requests."
+    }
+  ],
+  "csv_path": "./data/content/user-1/6cd61c3f-379e-4210-a5ec-233e7e318cd2/flashcards.csv",
+  "xlsx_path": "./data/content/user-1/6cd61c3f-379e-4210-a5ec-233e7e318cd2/flashcards.xlsx",
+  "config": {
+    "flashcard": {
+      "front": "Term",
+      "back": "Definition",
+      "difficulty": "easy"
+    }
+  },
+  "metadata": {
+    "docIds": null,
+    "subjectName": null,
+    "topicName": null
+  }
+}

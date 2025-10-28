@@ -407,12 +407,14 @@ export default function HistoryPage({ apiUrl }: HistoryPageProps) {
                     </span>
                   </td>
                   <td style={{ padding: 12, fontSize: 14, maxWidth: 300 }}>
-                    <div style={{ 
-                      whiteSpace: "nowrap", 
-                      overflow: "hidden", 
-                      textOverflow: "ellipsis",
-                      title: conv.userMessage
-                    }}>
+                    <div 
+                      style={{ 
+                        whiteSpace: "nowrap", 
+                        overflow: "hidden", 
+                        textOverflow: "ellipsis"
+                      }}
+                      title={conv.userMessage}
+                    >
                       {conv.userMessage}
                     </div>
                   </td>

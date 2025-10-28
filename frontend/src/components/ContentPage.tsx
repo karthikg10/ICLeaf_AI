@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 
-type Role = "Learner" | "Trainer" | "Admin";
-type Mode = "cloud" | "internal";
+type Role = "student" | "teacher" | "admin";
+type Mode = "internal" | "external";
 type ContentType = "pdf" | "ppt" | "flashcard" | "quiz" | "assessment" | "video" | "audio" | "compiler";
 type ContentStatus = "pending" | "completed" | "failed";
 
@@ -77,13 +77,13 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
     difficulty: "medium" as "easy" | "medium" | "hard",
     question_types: ["multiple_choice", "true_false"] as string[]
   });
-  const [assessmentConfig, setAssessmentConfig] = useState({
+  const [assessmentConfig] = useState({
     duration_minutes: 30,
     difficulty: "medium" as "easy" | "medium" | "hard",
     question_types: ["multiple_choice", "essay"] as string[],
     passing_score: 70
   });
-  const [videoConfig, setVideoConfig] = useState({
+  const [videoConfig] = useState({
     duration_seconds: 60,
     quality: "720p" as "480p" | "720p" | "1080p",
     include_subtitles: true
@@ -107,7 +107,7 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
     include_animations: true,
     difficulty: "medium" as "easy" | "medium" | "hard"
   });
-  const [compilerConfig, setCompilerConfig] = useState({
+  const [compilerConfig] = useState({
     language: "python" as "python" | "javascript" | "java" | "cpp",
     include_tests: true,
     difficulty: "medium" as "easy" | "medium" | "hard"
@@ -305,12 +305,6 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
     return new Date(dateString).toLocaleString();
   };
 
-  const formatFileSize = (bytes?: number) => {
-    if (!bytes) return "Unknown";
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  };
 
   useEffect(() => {
     if (activeTab === "list") {
@@ -1039,12 +1033,14 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                           </span>
                         </td>
                         <td style={{ padding: 12, fontSize: 14, maxWidth: 300 }}>
-                          <div style={{ 
-                            whiteSpace: "nowrap", 
-                            overflow: "hidden", 
-                            textOverflow: "ellipsis",
-                            title: content.prompt
-                          }}>
+                          <div 
+                            style={{ 
+                              whiteSpace: "nowrap", 
+                              overflow: "hidden", 
+                              textOverflow: "ellipsis"
+                            }}
+                            title={content.prompt}
+                          >
                             {content.prompt}
                           </div>
                         </td>

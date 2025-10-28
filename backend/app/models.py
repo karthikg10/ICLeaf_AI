@@ -1,10 +1,10 @@
 # backend/app/models.py
 from typing import List, Literal, Optional
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, Field, constr
 from datetime import datetime
 
-Role = Literal["Learner", "Trainer", "Admin"]
-Mode = Literal["cloud", "internal"]
+Role = Literal["student", "teacher", "admin"]
+Mode = Literal["internal", "external"]
 
 class SessionMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
@@ -19,9 +19,9 @@ class Message(BaseModel):
     content: str
 
 class ChatRequest(BaseModel):
-    role: Role = "Learner"
-    mode: Mode = "cloud"
-    message: str
+    role: Role = "student"
+    mode: Mode = "internal"
+    message: constr(max_length=500)  # Enforce 500 char limit
     sessionId: str
     userId: str
     subjectId: Optional[str] = None
@@ -32,12 +32,14 @@ class ChatRequest(BaseModel):
     history: List[SessionMessage] = []
     top_k: int = 4
 
-    # Normalize "mode" so "Internal", "INTERNAL", etc. become "internal"
+    # Map "cloud" to "external" for backward compatibility
     @field_validator("mode", mode="before")
     @classmethod
     def _normalize_mode(cls, v):
         if isinstance(v, str):
             v = v.strip().lower()
+            if v == "cloud":
+                v = "external"
         return v
 
 class Source(BaseModel):
@@ -49,12 +51,14 @@ class Source(BaseModel):
     relevanceScore: Optional[float] = None
 
 class ChatResponse(BaseModel):
-    answer: str
+    success: bool = True
+    response: str = Field(alias="answer")  # Support both "answer" and "response"
     sources: List[Source] = []
     sessionId: str
-    userId: str
-    mode: Mode
     timestamp: str = datetime.now().isoformat()
+    mode: Mode
+    
+    model_config = {"populate_by_name": True}  # Allow both field names
 
 
 
@@ -96,11 +100,20 @@ class ResetSessionRequest(BaseModel):
     resetScope: Optional[str] = "full"  # "full", "subject", "topic", "document"
 
 class ResetSessionResponse(BaseModel):
-    ok: bool
+    success: bool = Field(alias="ok")  # Support both "ok" and "success"
     sessionId: str
     userId: str
     message: str
     resetScope: str
+    
+    model_config = {"populate_by_name": True}
+
+# ----- Pagination -----
+class PaginationInfo(BaseModel):
+    currentPage: int
+    totalPages: int
+    totalRecords: int
+    recordsPerPage: int
 
 # ----- Knowledge Base Embedding -----
 class EmbedRequest(BaseModel):
@@ -112,7 +125,7 @@ class EmbedRequest(BaseModel):
     file_path: Optional[str] = None  # For file path
 
 class EmbedResponse(BaseModel):
-    ok: bool
+    success: bool = Field(alias="ok")  # Support both "ok" and "success"
     subjectId: str
     topicId: str
     docName: str
@@ -120,6 +133,8 @@ class EmbedResponse(BaseModel):
     chunks_processed: int
     embedding_model: str = "text-embedding-3-small"
     message: str
+    
+    model_config = {"populate_by_name": True}
 
 class IngestFileRequest(BaseModel):
     file_path: str
@@ -164,15 +179,16 @@ class HistoryRequest(BaseModel):
     docName: Optional[str] = None
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
-    limit: int = 100
-    offset: int = 0
+    page: int = 1
+    limit: int = 20  # Default 20 as per spec
 
 class HistoryResponse(BaseModel):
-    ok: bool
+    success: bool = Field(alias="ok")  # Support both "ok" and "success"
     conversations: List[Conversation]
-    total_count: int
-    filters: dict
+    pagination: PaginationInfo
     message: str
+    
+    model_config = {"populate_by_name": True}
 
 # ----- Analytics Models -----
 class AnalyticsMetrics(BaseModel):
@@ -289,26 +305,32 @@ class GeneratedContent(BaseModel):
     error: Optional[str] = None
 
 class GenerateContentResponse(BaseModel):
-    ok: bool
+    success: bool = Field(alias="ok")  # Support both "ok" and "success"
     contentId: str
     userId: str
     status: ContentStatus
     message: str
-    estimated_completion_time: Optional[int] = None  # seconds
+    etaSeconds: Optional[int] = Field(alias="estimated_completion_time")  # seconds
+    
+    model_config = {"populate_by_name": True}
 
 class ContentListResponse(BaseModel):
-    ok: bool
-    content: List[GeneratedContent]
-    total_count: int
+    success: bool = Field(alias="ok")  # Support both "ok" and "success"
+    contents: List[GeneratedContent] = Field(alias="content")  # Rename content to contents
+    pagination: PaginationInfo
     userId: str
+    
+    model_config = {"populate_by_name": True}
 
 class ContentDownloadResponse(BaseModel):
-    ok: bool
+    success: bool = Field(alias="ok")  # Support both "ok" and "success"
     contentId: str
     filePath: str
     downloadUrl: str
     contentType: str
     fileSize: Optional[int] = None
+    
+    model_config = {"populate_by_name": True}
 
 # Enhanced Analytics Models
 class TokenUsage(BaseModel):

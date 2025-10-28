@@ -23,7 +23,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 
 
 # our modules
-import app.rag_store_simple as rag
+import app.rag_store_chromadb as rag
 from app.ingest_dir import ingest_dir
 from .models import (
     ChatRequest, ChatResponse, Source, Message,
@@ -31,17 +31,27 @@ from .models import (
 )
 from . import deps               # env + config
 from .api_router import api_router  # API router with proper structure
+from .cleanup_service import cleanup_service
 
 app = FastAPI(title="ICLeaF Chatbot", version="0.2")
 
 # Include the API router
-app.include_router(api_router)
+app.include_router(api_router, prefix="/api")
 
 # ---- preload your repo docs on boot (Internal mode data) ----
 @app.on_event("startup")
 async def _preload_docs():
-    # Initialize rate limiter (commented out for testing)
-    # await FastAPILimiter.init()
+    # Initialize rate limiter
+    try:
+        await FastAPILimiter.init()
+        print("[startup] Rate limiter initialized")
+    except Exception as e:
+        print(f"[startup] Rate limiter initialization failed: {e}")
+        print("[startup] Continuing without rate limiting...")
+    
+    # Start cleanup service
+    cleanup_service.start()
+    print("[startup] Cleanup service started")
     
     docs_dir = os.getenv("DOCS_DIR", "./seed_docs")
     reindex = os.getenv("REINDEX_ON_START", "false").lower() == "true"
@@ -58,8 +68,11 @@ async def _preload_docs():
     count_added = ingest_dir(docs_dir)
     print(f"[startup] Ingested {count_added} chunks from {docs_dir} (REINDEX_ON_START={reindex})")
 
-
-
+@app.on_event("shutdown")
+async def _shutdown():
+    """Cleanup on shutdown."""
+    cleanup_service.stop()
+    print("[shutdown] Cleanup service stopped")
 
 
 

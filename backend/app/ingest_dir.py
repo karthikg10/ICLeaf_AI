@@ -129,7 +129,7 @@ def build_docs_for_dir(root_dir: str) -> List[Tuple[str, Dict]]:
             out.extend(docs)
     return out
 
-import app.rag_store_simple as rag
+import app.rag_store_chromadb as rag
 
 def ingest_dir(root_dir: str, subject_id: str = None, topic_id: str = None, uploaded_by: str = None) -> int:
     docs = build_docs_for_dir(root_dir)
