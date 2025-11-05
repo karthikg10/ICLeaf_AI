@@ -1,10 +1,12 @@
 # backend/app/embedding_service.py
 import os
 import hashlib
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from openai import OpenAI
 from . import deps
+from . import rag_store_chromadb as rag
 from .models import EmbedRequest, EmbedResponse, IngestFileRequest, IngestDirRequest
+from .ingest_dir import _read_file_build_docs
 
 # Initialize OpenAI client for embeddings
 embedding_client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else None
@@ -75,7 +77,7 @@ def process_document_content(content: str, doc_name: str, chunk_size: int = 1000
     return chunks
 
 def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: str, uploaded_by: str) -> EmbedResponse:
-    """Embed a single file into the knowledge base."""
+    """Embed a single file into the knowledge base and store in ChromaDB."""
     try:
         if not os.path.exists(file_path):
             return EmbedResponse(
@@ -88,11 +90,10 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
                 message=f"File not found: {file_path}"
             )
         
-        # Read file content
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
+        # Use ingest_dir logic to read different file types (PDF, DOCX, TXT, etc.)
+        docs = _read_file_build_docs(file_path)
         
-        if not content.strip():
+        if not docs:
             return EmbedResponse(
                 ok=False,
                 subjectId=subject_id,
@@ -100,26 +101,40 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
                 docName=doc_name,
                 uploadedBy=uploaded_by,
                 chunks_processed=0,
-                message="File is empty or contains no readable content"
+                message="File is empty, unreadable, or unsupported format"
             )
         
-        # Process content into chunks
-        chunks = process_document_content(content, doc_name)
+        # Prepare documents for ChromaDB with metadata
+        chroma_docs: List[Tuple[str, Dict]] = []
+        for chunk_text, meta in docs:
+            # Enhance metadata with upload information
+            enhanced_meta = meta.copy()
+            enhanced_meta["subjectId"] = subject_id
+            enhanced_meta["topicId"] = topic_id
+            enhanced_meta["docName"] = doc_name or meta.get("filename", os.path.basename(file_path))
+            enhanced_meta["uploadedBy"] = uploaded_by
+            enhanced_meta["filename"] = meta.get("filename", os.path.basename(file_path))
+            enhanced_meta["title"] = meta.get("title", enhanced_meta.get("filename", "Document"))
+            enhanced_meta["source"] = "upload"
+            
+            chroma_docs.append((chunk_text, enhanced_meta))
         
-        if not chunks:
-            return EmbedResponse(
-                ok=False,
-                subjectId=subject_id,
-                topicId=topic_id,
-                docName=doc_name,
-                uploadedBy=uploaded_by,
-                chunks_processed=0,
-                message="No valid chunks could be created from the file"
-            )
-        
-        # Store in RAG store (this would integrate with your existing RAG system)
-        # For now, we'll return success - you'll need to integrate with your RAG store
-        # rag_store.add_chunks(chunks, subject_id, topic_id, doc_name, uploaded_by)
+        # Store in ChromaDB RAG store
+        if chroma_docs:
+            try:
+                rag.add_documents(chroma_docs)
+                print(f"[embed] Successfully stored {len(chroma_docs)} chunks from {doc_name} in ChromaDB")
+            except Exception as e:
+                print(f"[embed] Error storing in ChromaDB: {e}")
+                return EmbedResponse(
+                    ok=False,
+                    subjectId=subject_id,
+                    topicId=topic_id,
+                    docName=doc_name,
+                    uploadedBy=uploaded_by,
+                    chunks_processed=0,
+                    message=f"Error storing in ChromaDB: {str(e)}"
+                )
         
         return EmbedResponse(
             ok=True,
@@ -127,8 +142,8 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
             topicId=topic_id,
             docName=doc_name,
             uploadedBy=uploaded_by,
-            chunks_processed=len(chunks),
-            message=f"Successfully processed {len(chunks)} chunks from {doc_name}"
+            chunks_processed=len(chroma_docs),
+            message=f"Successfully processed and stored {len(chroma_docs)} chunks from {doc_name} in ChromaDB"
         )
         
     except Exception as e:

@@ -533,8 +533,37 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
                     message="No valid chunks could be created from the content"
                 )
             
-            # TODO: Store chunks in RAG store with metadata
-            # rag_store.add_chunks_with_metadata(chunks, req.subjectId, req.topicId, req.docName, req.uploadedBy)
+            # Convert chunks to ChromaDB format (list of tuples: (text, metadata))
+            chroma_docs = []
+            for chunk in chunks:
+                meta = {
+                    "filename": req.docName or "direct_content",
+                    "title": req.docName or "Direct Content",
+                    "subjectId": req.subjectId,
+                    "topicId": req.topicId,
+                    "docName": req.docName,
+                    "uploadedBy": req.uploadedBy,
+                    "chunk_index": chunk.get("metadata", {}).get("chunk_index", 0),
+                    "source": "direct_embed"
+                }
+                chroma_docs.append((chunk["text"], meta))
+            
+            # Store in ChromaDB RAG store
+            if chroma_docs:
+                try:
+                    rag.add_documents(chroma_docs)
+                    print(f"[embed] Successfully stored {len(chroma_docs)} chunks from direct content in ChromaDB")
+                except Exception as e:
+                    print(f"[embed] Error storing in ChromaDB: {e}")
+                    return EmbedResponse(
+                        ok=False,
+                        subjectId=req.subjectId,
+                        topicId=req.topicId,
+                        docName=req.docName,
+                        uploadedBy=req.uploadedBy,
+                        chunks_processed=0,
+                        message=f"Error storing in ChromaDB: {str(e)}"
+                    )
             
             return EmbedResponse(
                 ok=True,
@@ -542,8 +571,8 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
                 topicId=req.topicId,
                 docName=req.docName,
                 uploadedBy=req.uploadedBy,
-                chunks_processed=len(chunks),
-                message=f"Successfully embedded {len(chunks)} chunks"
+                chunks_processed=len(chroma_docs),
+                message=f"Successfully embedded and stored {len(chroma_docs)} chunks in ChromaDB"
             )
             
         elif req.file_path:
