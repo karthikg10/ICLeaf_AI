@@ -41,6 +41,34 @@ app.include_router(api_router, prefix="/api")
 # ---- preload your repo docs on boot (Internal mode data) ----
 @app.on_event("startup")
 async def _preload_docs():
+    # Validate OpenAI API key on startup
+    if not deps.OPENAI_API_KEY:
+        print("[startup] ⚠️  WARNING: OpenAI API key is not set!")
+        print("[startup] ⚠️  The application will start but chatbot and content generation features will not work.")
+        print("[startup] ⚠️  Please set OPENAI_API_KEY in your .env file and restart the server.")
+    else:
+        # Test API key by making a simple request
+        try:
+            from openai import OpenAI
+            test_client = OpenAI(api_key=deps.OPENAI_API_KEY)
+            # Make a minimal test request
+            test_client.models.list()
+            print("[startup] ✓ OpenAI API key validated successfully")
+        except Exception as e:
+            error_msg = str(e)
+            if "Invalid API key" in error_msg or "incorrect API key" in error_msg.lower():
+                print("[startup] ❌ ERROR: Invalid OpenAI API key!")
+                print(f"[startup] ❌ Error: {error_msg}")
+                print("[startup] ❌ Please check your .env file and ensure the API key is correct.")
+                print("[startup] ❌ The application will start but API calls will fail.")
+            elif "Insufficient quota" in error_msg or "quota" in error_msg.lower():
+                print("[startup] ⚠️  WARNING: OpenAI API quota issue detected")
+                print(f"[startup] ⚠️  Error: {error_msg}")
+                print("[startup] ⚠️  Please check your OpenAI account billing.")
+            else:
+                print(f"[startup] ⚠️  WARNING: Could not validate API key: {error_msg}")
+                print("[startup] ⚠️  The application will start but API calls may fail.")
+    
     # Initialize rate limiter
     try:
         await FastAPILimiter.init()
@@ -55,18 +83,29 @@ async def _preload_docs():
     
     docs_dir = os.getenv("DOCS_DIR", "./seed_docs")
     reindex = os.getenv("REINDEX_ON_START", "false").lower() == "true"
+    skip_ingestion = os.getenv("SKIP_INGESTION_ON_START", "false").lower() == "true"
 
-    if not os.path.isdir(docs_dir):
-        print(f"[startup] DOCS_DIR not found: {docs_dir}")
-        return
+    if skip_ingestion:
+        print(f"[startup] Skipping document ingestion (SKIP_INGESTION_ON_START=true)")
+        print(f"[startup] ChromaDB already has {rag.count()} documents")
+    elif not os.path.isdir(docs_dir):
+        print(f"[startup] DOCS_DIR not found: {docs_dir}, skipping ingestion")
+        print(f"[startup] ChromaDB already has {rag.count()} documents")
+    else:
+        if reindex:
+            # delete on-disk index and reset collection
+            shutil.rmtree("./data/chroma", ignore_errors=True)
+            rag.reset_index()
 
-    if reindex:
-        # delete on-disk index and reset collection
-        shutil.rmtree("./data/chroma", ignore_errors=True)
-        rag.reset_index()
-
-    count_added = ingest_dir(docs_dir)
-    print(f"[startup] Ingested {count_added} chunks from {docs_dir} (REINDEX_ON_START={reindex})")
+        print(f"[startup] Starting document ingestion from {docs_dir}...")
+        try:
+            count_added = ingest_dir(docs_dir)
+            print(f"[startup] ✓ Ingested {count_added} chunks from {docs_dir} (REINDEX_ON_START={reindex})")
+        except Exception as e:
+            print(f"[startup] ⚠️  Error during document ingestion: {e}")
+            print(f"[startup] ⚠️  Continuing startup with existing {rag.count()} documents in ChromaDB")
+    
+    print(f"[startup] ✓ Application startup complete")
 
 @app.on_event("shutdown")
 async def _shutdown():

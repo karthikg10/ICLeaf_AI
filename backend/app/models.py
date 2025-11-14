@@ -307,12 +307,12 @@ class GeneratedContent(BaseModel):
     error: Optional[str] = None
 
 class GenerateContentResponse(BaseModel):
-    success: bool = Field(alias="ok")  # Support both "ok" and "success"
+    success: bool = Field(alias="ok", default=True)  # Support both "ok" and "success"
     contentId: str
     userId: str
     status: ContentStatus
     message: str
-    etaSeconds: Optional[int] = Field(alias="estimated_completion_time")  # seconds
+    estimated_completion_time: Optional[int] = Field(default=None, alias="etaSeconds")  # seconds
     
     model_config = {"populate_by_name": True}
 

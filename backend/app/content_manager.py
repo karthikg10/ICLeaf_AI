@@ -11,6 +11,7 @@ from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
+from reportlab.lib import colors
 from pptx import Presentation
 from pptx.util import Inches, Pt
 import csv
@@ -698,8 +699,15 @@ def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]]) ->
 
     return csv_path, xlsx_path
 
-async def generate_video_content(request: GenerateContentRequest, config: VideoConfig, content_id: str) -> str:
-    """Generate actual video file using AI video generation."""
+async def generate_video_content(request: GenerateContentRequest, config: VideoConfig, content_id: str, storage_path: str) -> str:
+    """Generate actual video file using AI video generation.
+    
+    Args:
+        request: Content generation request
+        config: Video configuration
+        content_id: Pre-generated content ID
+        storage_path: Pre-created storage directory path
+    """
     if not content_client:
         raise Exception("OpenAI client not configured")
     
@@ -730,10 +738,7 @@ Make it engaging and visually appealing for video viewing."""
     
     # Generate the actual video file
     try:
-        # Create storage directory
-        storage_path = f"./data/content/{request.userId}/{content_id}"
-        os.makedirs(storage_path, exist_ok=True)
-        
+        # Use the provided storage_path (folder already created in process_content_generation)
         # Create script file (faster than video generation)
         script_path = os.path.join(storage_path, "video_script.txt")
         with open(script_path, 'w', encoding='utf-8') as f:
@@ -751,8 +756,15 @@ Make it engaging and visually appealing for video viewing."""
             f.write(f"Error generating video: {str(e)}\n\nScript: {script_content}")
         return script_path
 
-async def generate_audio_content(request: GenerateContentRequest, config: AudioConfig, content_id: str) -> str:
-    """Generate actual MP3 audio file using OpenAI TTS."""
+async def generate_audio_content(request: GenerateContentRequest, config: AudioConfig, content_id: str, storage_path: str) -> str:
+    """Generate actual MP3 audio file using OpenAI TTS.
+    
+    Args:
+        request: Content generation request
+        config: Audio configuration
+        content_id: Pre-generated content ID
+        storage_path: Pre-created storage directory path
+    """
     if not content_client:
         raise Exception("OpenAI client not configured")
     
@@ -783,10 +795,7 @@ Make it engaging and conversational for audio listening."""
     
     # Generate the actual MP3 file using TTS
     try:
-        # Create storage directory
-        storage_path = f"./data/content/{request.userId}/{content_id}"
-        os.makedirs(storage_path, exist_ok=True)
-        
+        # Use the provided storage_path (folder already created in process_content_generation)
         # Generate MP3 file
         audio_path = os.path.join(storage_path, f"audio.{config.format}")
         print(f"[DEBUG] Attempting TTS generation: {audio_path}")
@@ -851,8 +860,14 @@ Difficulty: {config.difficulty}"""
     
     return response.choices[0].message.content
 
-async def generate_pdf_content(request: GenerateContentRequest) -> str:
-    """Generate PDF content and save to file."""
+async def generate_pdf_content(request: GenerateContentRequest, content_id: str, storage_path: str) -> str:
+    """Generate PDF content and save to file.
+    
+    Args:
+        request: Content generation request
+        content_id: Pre-generated content ID (must match the one in process_content_generation)
+        storage_path: Pre-created storage directory path
+    """
     if not content_client:
         raise Exception("OpenAI client not configured")
     
@@ -864,6 +879,7 @@ async def generate_pdf_content(request: GenerateContentRequest) -> str:
     difficulty = pdf_config.get('difficulty', 'medium')
     
     print(f"[DEBUG] PDF Config: num_pages={num_pages}, target_audience={target_audience}, difficulty={difficulty}")
+    print(f"[DEBUG] Using content_id: {content_id}, storage_path: {storage_path}")
     
     system_prompt = f"""You are a PDF content generator. Create structured content for a PDF document.
 User role: {request.role}
@@ -896,93 +912,199 @@ CRITICAL REQUIREMENTS:
     
     content = response.choices[0].message.content
     
-    # Clean markdown formatting
+    # Clean markdown formatting and remove unwanted artifacts
     content = clean_markdown_formatting(content)
+    # Remove "Page X" or "Page X topic" patterns
+    content = re.sub(r'Page\s+\d+\s*(topic|title|content)?\s*:?', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'^\d+\.\s*Page\s+\d+', '', content, flags=re.MULTILINE | re.IGNORECASE)
     
-    # Create actual PDF file
-    content_id = generate_content_id()
-    storage_path = f"./data/content/{request.userId}/{content_id}"
-    os.makedirs(storage_path, exist_ok=True)
-    
+    # Use the provided storage_path (folder already created in process_content_generation)
     pdf_path = os.path.join(storage_path, "document.pdf")
     
-    # Create PDF using ReportLab
-    doc = SimpleDocTemplate(pdf_path, pagesize=A4)
+    # Create PDF using ReportLab with proper formatting
+    doc = SimpleDocTemplate(pdf_path, pagesize=A4, 
+                           rightMargin=72, leftMargin=72,
+                           topMargin=72, bottomMargin=72)
     styles = getSampleStyleSheet()
     story = []
     
-    # Title
+    # Adjust font sizes based on target audience and difficulty
+    if target_audience == 'students':
+        base_font_size = 11
+        heading_font_size = 16
+    elif target_audience == 'teachers' or difficulty == 'advanced':
+        base_font_size = 10
+        heading_font_size = 15
+    else:
+        base_font_size = 12
+        heading_font_size = 18
+    
+    # Title page style
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
-        fontSize=18,
+        fontSize=heading_font_size + 4,
         spaceAfter=30,
-        alignment=1  # Center alignment
+        alignment=1,  # Center alignment
+        textColor=colors.HexColor('#333366')  # Dark blue
     )
-    story.append(Paragraph("ICLeafAI", title_style))
-    story.append(Spacer(1, 20))
     
-    # Content
+    # Main title
+    title_text = request.prompt[:50] + "..." if len(request.prompt) > 50 else request.prompt
+    story.append(Spacer(1, 2*inch))
+    story.append(Paragraph(title_text, title_style))
+    story.append(Spacer(1, 0.5*inch))
+    
+    # Subtitle with metadata
+    subtitle_style = ParagraphStyle(
+        'CustomSubtitle',
+        parent=styles['Normal'],
+        fontSize=base_font_size,
+        alignment=1,
+        textColor=colors.HexColor('#666666')
+    )
+    story.append(Paragraph(f"Target Audience: {target_audience.title()} | Difficulty: {difficulty.title()}", subtitle_style))
+    story.append(PageBreak())
+    
+    # Heading style
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=heading_font_size,
+        spaceAfter=12,
+        spaceBefore=20,
+        leftIndent=0,
+        textColor=colors.HexColor('#1a1a4d'),
+        fontName='Helvetica-Bold'
+    )
+    
+    # Content style
     content_style = ParagraphStyle(
         'CustomContent',
         parent=styles['Normal'],
-        fontSize=12,
-        spaceAfter=12,
-        leftIndent=20
+        fontSize=base_font_size,
+        spaceAfter=10,
+        leftIndent=0,
+        rightIndent=0,
+        alignment=0,  # Left align
+        leading=base_font_size + 2
     )
     
-    # Split content into sections and add to PDF with proper formatting
-    sections = content.split('\n\n')
-    current_page_count = 0
-    target_page_count = num_pages
-    sections_per_page = max(1, len(sections) // target_page_count)  # Distribute sections across pages
+    # Parse content into structured sections
+    # Split by double newlines, then clean and structure
+    raw_sections = [s.strip() for s in content.split('\n\n') if s.strip()]
+    
+    # Remove empty sections and filter out artifacts
+    sections = []
+    for section in raw_sections:
+        # Skip sections that are just page numbers or artifacts
+        if re.match(r'^(Page\s+\d+|^\d+\.?\s*$)', section, re.IGNORECASE):
+            continue
+        # Skip very short sections that are likely artifacts
+        if len(section) < 20:
+            continue
+        sections.append(section)
+    
+    # Distribute sections across target pages
+    # Calculate content per page (aim for ~600-800 words per page)
+    # Estimate: ~5 words per line, ~50 lines per page = ~250 words per page
+    # But we want more content, so let's aim for better distribution
+    if len(sections) < num_pages:
+        # Not enough sections - we'll need to split existing sections
+        # Or add more spacing/content to fill pages
+        sections_per_page = 1
+    else:
+        sections_per_page = max(1, len(sections) // num_pages)
+    
+    pages_created = 1  # Start with 1 (title page already added)
+    sections_added = 0
     
     for i, section in enumerate(sections):
-        if section.strip():
-            # Clean up the section text
-            section_text = section.strip().replace('\n', '<br/>')
-            
-            # Check if this looks like a heading
-            if section_text.startswith('#') or len(section_text) < 100:
-                # This is likely a heading
-                heading_style = ParagraphStyle(
-                    'CustomHeading',
-                    parent=styles['Heading2'],
-                    fontSize=14,
-                    spaceAfter=12,
-                    spaceBefore=20,
-                    leftIndent=0
-                )
-                story.append(Paragraph(section_text.replace('#', '').strip(), heading_style))
-            else:
-                # This is content
-                story.append(Paragraph(section_text, content_style))
-                story.append(Spacer(1, 12))
-            
-            # Add page break more aggressively to reach target page count
-            current_page_count += 1
-            if (i + 1) % sections_per_page == 0 and i < len(sections) - 1:
-                story.append(PageBreak())
-                current_page_count = 0
+        if pages_created >= num_pages and sections_added > 0:
+            # We've reached the target page count
+            break
+        
+        lines = [line.strip() for line in section.split('\n') if line.strip()]
+        if not lines:
+            continue
+        
+        # Determine if first line is a heading
+        first_line = lines[0]
+        is_heading = (
+            len(first_line) < 100 and 
+            (first_line.isupper() or 
+             first_line.startswith('#') or
+             not first_line.endswith('.') or
+             len(first_line.split()) < 10)
+        )
+        
+        if is_heading:
+            # Add heading
+            heading_text = first_line.replace('#', '').strip()
+            # Remove common heading prefixes
+            heading_text = re.sub(r'^(Section|Chapter|Part|Topic)\s+\d+[.:]?\s*', '', heading_text, flags=re.IGNORECASE)
+            story.append(Paragraph(heading_text, heading_style))
+            content_lines = lines[1:]
+        else:
+            content_lines = lines
+        
+        # Add content paragraphs
+        current_paragraph = []
+        for line in content_lines:
+            # Skip bullet points for now (handle them as regular text)
+            line_clean = line.lstrip('-•* ').strip()
+            if line_clean:
+                current_paragraph.append(line_clean)
+        
+        # Add paragraphs
+        if current_paragraph:
+            para_text = ' '.join(current_paragraph)
+            # Replace multiple spaces with single space
+            para_text = re.sub(r'\s+', ' ', para_text)
+            if para_text:
+                story.append(Paragraph(para_text, content_style))
+                story.append(Spacer(1, 8))
+                sections_added += 1
+        
+        # Add page break based on distribution to enforce page count
+        # We want to distribute content evenly across pages
+        if pages_created < num_pages:
+            # Calculate if we should add a page break
+            # Aim to distribute sections evenly
+            if len(sections) > 0:
+                sections_per_page_target = max(1, len(sections) / num_pages)
+                if (i + 1) >= sections_per_page_target * (pages_created + 1) and (i + 1) < len(sections):
+                    story.append(PageBreak())
+                    pages_created += 1
     
-    # Add footer
-    story.append(PageBreak())
-    footer_style = ParagraphStyle(
-        'Footer',
-        parent=styles['Normal'],
-        fontSize=10,
-        alignment=1
-    )
-    story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", footer_style))
-    story.append(Paragraph(f"User: {request.userId}", footer_style))
+    # If we haven't reached the target page count, add filler content
+    # ReportLab will create pages as needed, but we want to ensure we hit the target
+    if pages_created < num_pages:
+        remaining_pages = num_pages - pages_created
+        for page_num in range(remaining_pages):
+            story.append(PageBreak())
+            # Add a section header
+            story.append(Paragraph(f"Additional Information", heading_style))
+            story.append(Spacer(1, 0.3*inch))
+            # Add some filler content with spacing to ensure it takes up a page
+            for _ in range(15):  # Add enough content to fill a page
+                story.append(Paragraph("This section provides additional details and information related to the topic.", content_style))
+                story.append(Spacer(1, 0.2*inch))
+            pages_created += 1
     
     # Build PDF
     doc.build(story)
     
     return pdf_path
 
-async def generate_ppt_content(request: GenerateContentRequest) -> str:
-    """Generate PowerPoint content using simple python-pptx approach."""
+async def generate_ppt_content(request: GenerateContentRequest, content_id: str, storage_path: str) -> str:
+    """Generate PowerPoint content using simple python-pptx approach.
+    
+    Args:
+        request: Content generation request
+        content_id: Pre-generated content ID (must match the one in process_content_generation)
+        storage_path: Pre-created storage directory path
+    """
     if not content_client:
         raise Exception("OpenAI client not configured")
     
@@ -994,6 +1116,7 @@ async def generate_ppt_content(request: GenerateContentRequest) -> str:
     difficulty = ppt_config.get('difficulty', 'medium')
     
     print(f"[DEBUG] PPT Config: num_slides={num_slides}, target_audience={target_audience}, difficulty={difficulty}")
+    print(f"[DEBUG] Using content_id: {content_id}, storage_path: {storage_path}")
     
     system_prompt = f"""You are a PowerPoint content generator. Create comprehensive content for a presentation.
 User role: {request.role}
@@ -1048,107 +1171,194 @@ IMPORTANT: Keep all content SHORT and CONCISE to prevent overflow."""
     
     # Clean markdown formatting
     content = clean_markdown_formatting(content)
+    # Remove unwanted artifacts
+    content = re.sub(r'Slide\s+\d+[.:]?\s*', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'^\d+\.\s*Slide\s+\d+', '', content, flags=re.MULTILINE | re.IGNORECASE)
     
-    # Create actual PowerPoint file
-    content_id = generate_content_id()
-    storage_path = f"./data/content/{request.userId}/{content_id}"
-    os.makedirs(storage_path, exist_ok=True)
-    
+    # Use the provided storage_path (folder already created in process_content_generation)
     ppt_path = os.path.join(storage_path, "presentation.pptx")
     
-    # Create simple PowerPoint presentation
+    # Create PowerPoint presentation
     prs = Presentation()
     
-    # Add simple title slide
-    title_slide_layout = prs.slide_layouts[0]  # Title slide layout
+    # Set slide width and height (standard 16:9)
+    prs.slide_width = Inches(10)
+    prs.slide_height = Inches(7.5)
+    
+    # Title slide
+    title_slide_layout = prs.slide_layouts[0]
     slide = prs.slides.add_slide(title_slide_layout)
     title = slide.shapes.title
-    subtitle = slide.placeholders[1]
+    subtitle = slide.placeholders[1] if len(slide.placeholders) > 1 else None
     
-    # Simple title
-    title.text = "ICLeafAI"
-    subtitle.text = f"{datetime.now().strftime('%Y-%m-%d')}"
+    # Set title - use prompt or first part of it
+    title_text = request.prompt[:60] + "..." if len(request.prompt) > 60 else request.prompt
+    title.text = title_text
     
-    # Parse content into comprehensive slides
-    sections = content.split('\n\n')
-    slide_count = 0
-    max_slides = num_slides
+    # Set subtitle with metadata
+    if subtitle:
+        subtitle.text = f"Target Audience: {target_audience.title()} | Difficulty: {difficulty.title()}\n{datetime.now().strftime('%Y-%m-%d')}"
     
-    for section in sections:
-        if section.strip() and slide_count < max_slides:
-            lines = section.strip().split('\n')
+    # Parse content into slides
+    # Split content into sections
+    raw_sections = [s.strip() for s in content.split('\n\n') if s.strip()]
+    
+    # Filter and clean sections
+    sections = []
+    for section in raw_sections:
+        # Skip artifacts
+        if re.match(r'^(Slide\s+\d+|^\d+\.?\s*$)', section, re.IGNORECASE):
+            continue
+        if len(section) < 15:
+            continue
+        sections.append(section)
+    
+    # Calculate slides per section to reach target
+    # We already have 1 title slide, so we need (num_slides - 1) content slides
+    target_content_slides = max(1, num_slides - 1)
+    
+    if len(sections) == 0:
+        # No content - create placeholder slides
+        sections = [request.prompt]
+    
+    # Distribute sections across slides
+    if len(sections) <= target_content_slides:
+        # Each section gets its own slide (or combine if needed)
+        sections_per_slide = 1
+    else:
+        # Multiple sections per slide, or split sections
+        sections_per_slide = max(1, len(sections) // target_content_slides)
+    
+    slide_count = 1  # Start at 1 (title slide already added)
+    sections_processed = 0
+    
+    # Use content layout for content slides
+    content_layout = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
+    
+    for i, section in enumerate(sections):
+        if slide_count >= num_slides:
+            break
+        
+        lines = [line.strip() for line in section.split('\n') if line.strip()]
+        if not lines:
+            continue
+        
+        # Extract slide title (first line or first few words)
+        slide_title = lines[0].strip()
+        # Clean title
+        slide_title = re.sub(r'^(Title|Slide|Section)\s*\d*[.:]?\s*', '', slide_title, flags=re.IGNORECASE)
+        slide_title = slide_title.replace('Title:', '').replace('#', '').strip()
+        if not slide_title:
+            slide_title = f"Section {slide_count}"
+        
+        # Truncate title if too long
+        if len(slide_title) > 60:
+            slide_title = slide_title[:57] + "..."
+        
+        # Extract content (remaining lines)
+        content_lines = lines[1:] if len(lines) > 1 else lines
+        slide_content = '\n'.join(content_lines).strip()
+        slide_content = slide_content.replace('Content:', '').strip()
+        
+        # Create slide
+        slide = prs.slides.add_slide(content_layout)
+        title_shape = slide.shapes.title
+        content_placeholder = slide.placeholders[1] if len(slide.placeholders) > 1 else None
+        
+        # Set title
+        title_shape.text = slide_title
+        
+        # Process content into bullet points
+        if content_placeholder and slide_content:
+            text_frame = content_placeholder.text_frame
+            text_frame.clear()
+            text_frame.word_wrap = True
             
-            # Extract title (first line, clean it up)
-            slide_title = lines[0].strip()
-            if slide_title.startswith('Title:'):
-                slide_title = slide_title.replace('Title:', '').strip()
-            elif slide_title.startswith('#'):
-                slide_title = slide_title.replace('#', '').strip()
+            # Adjust bullet points based on difficulty and audience
+            if target_audience == 'students' or difficulty == 'beginner':
+                max_bullets = 4
+                max_chars = 70
+            elif difficulty == 'advanced':
+                max_bullets = 6
+                max_chars = 90
+            else:
+                max_bullets = 5
+                max_chars = 80
             
-            # Extract content (remaining lines)
-            slide_content = '\n'.join(lines[1:]).strip() if len(lines) > 1 else section.strip()
-            if slide_content.startswith('Content:'):
-                slide_content = slide_content.replace('Content:', '').strip()
+            # Split content into bullet points
+            bullet_lines = []
+            seen_points = set()
             
-            # Only create slide if we have substantial content
-            if len(slide_content.strip()) > 20:  # Ensure we have meaningful content
-                # Create content slide
-                layout = prs.slide_layouts[1]  # Content layout
-                slide = prs.slides.add_slide(layout)
-                title = slide.shapes.title
-                content_placeholder = slide.placeholders[1]
+            for line in slide_content.split('\n'):
+                if len(bullet_lines) >= max_bullets:
+                    break
                 
-                # Set title
-                title.text = slide_title
+                line = line.strip()
+                if not line:
+                    continue
                 
-                # Process content into bullet points (avoid duplicates and limit content)
-                content_lines = []
-                seen_points = set()
-                max_bullet_points = 5  # Limit bullet points per slide
-                max_chars_per_bullet = 80  # Limit characters per bullet point
-                total_chars = 0
-                max_total_chars = 400  # Limit total characters per slide
+                # Clean bullet markers
+                line = re.sub(r'^[-•*]\s*', '', line)
+                line = line.strip()
                 
-                for line in slide_content.split('\n'):
-                    if len(content_lines) >= max_bullet_points:
-                        break
-                    if total_chars >= max_total_chars:
-                        break
-                        
-                    line = line.strip()
-                    if line and not line.startswith(' '):
-                        # Clean bullet points
-                        if line.startswith('-') or line.startswith('•') or line.startswith('*'):
-                            line = line[1:].strip()
-                        
-                        # Truncate if too long
-                        if len(line) > max_chars_per_bullet:
-                            line = line[:max_chars_per_bullet-3] + "..."
-                        
-                        # Check for duplicates (case-insensitive) and ensure substantial content
-                        line_lower = line.lower()
-                        if (line_lower not in seen_points and 
-                            line_lower and 
-                            len(line) > 10):  # Ensure substantial bullet points
-                            seen_points.add(line_lower)
-                            content_lines.append(line)
-                            total_chars += len(line)
+                if not line or len(line) < 10:
+                    continue
                 
-                # Only add slide if we have meaningful content
-                if content_lines:
-                    final_content = '\n'.join(content_lines)
-                    content_placeholder.text = final_content
-                    slide_count += 1
-                else:
-                    # If no content, remove the slide
-                    slide_id = slide.slide_id
-                    prs.slides._sldIdLst.remove(slide_id)
+                # Truncate if too long
+                if len(line) > max_chars:
+                    line = line[:max_chars-3] + "..."
+                
+                # Check for duplicates
+                line_lower = line.lower()
+                if line_lower not in seen_points:
+                    seen_points.add(line_lower)
+                    bullet_lines.append(line)
+            
+            # Add bullet points to slide
+            if bullet_lines:
+                for idx, bullet in enumerate(bullet_lines):
+                    if idx == 0:
+                        p = text_frame.paragraphs[0]
+                    else:
+                        p = text_frame.add_paragraph()
+                    p.text = bullet
+                    p.level = 0
+                    p.font.size = Pt(14 if target_audience == 'students' else 12)
+                    p.space_after = Pt(6)
+            else:
+                # No bullets - add as single paragraph
+                p = text_frame.paragraphs[0]
+                p.text = slide_content[:200] + "..." if len(slide_content) > 200 else slide_content
+                p.font.size = Pt(12)
+        
+        slide_count += 1
+        sections_processed += 1
+        
+        # Add slides to reach target if needed
+        if (i + 1) % sections_per_slide == 0 and slide_count < num_slides and (i + 1) < len(sections):
+            # Continue with next section
+            continue
     
-    # Simple formatting - no complex styling
-    pass
+    # Fill remaining slides to reach target count
+    while slide_count < num_slides:
+        slide = prs.slides.add_slide(content_layout)
+        title_shape = slide.shapes.title
+        content_placeholder = slide.placeholders[1] if len(slide.placeholders) > 1 else None
+        
+        title_shape.text = f"Additional Content {slide_count}"
+        if content_placeholder:
+            text_frame = content_placeholder.text_frame
+            text_frame.clear()
+            p = text_frame.paragraphs[0]
+            p.text = "Additional information and details..."
+            p.font.size = Pt(12)
+        
+        slide_count += 1
     
     # Save presentation
     prs.save(ppt_path)
+    
+    print(f"[DEBUG] Created PPT with {len(prs.slides)} slides (target: {num_slides})")
     
     return ppt_path
 
@@ -1398,19 +1608,19 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         elif request.contentType == "video" and request.contentConfig.get('video'):
             video_config_dict = request.contentConfig.get('video')
             video_config = VideoConfig(**video_config_dict)
-            generated_content = await generate_video_content(request, video_config, content_id)
+            generated_content = await generate_video_content(request, video_config, content_id, storage_path)
         elif request.contentType == "audio" and request.contentConfig.get('audio'):
             audio_config_dict = request.contentConfig.get('audio')
             audio_config = AudioConfig(**audio_config_dict)
-            generated_content = await generate_audio_content(request, audio_config, content_id)
+            generated_content = await generate_audio_content(request, audio_config, content_id, storage_path)
         elif request.contentType == "compiler" and request.contentConfig.get('compiler'):
             compiler_config_dict = request.contentConfig.get('compiler')
             compiler_config = CompilerConfig(**compiler_config_dict)
             generated_content = await generate_compiler_content(request, compiler_config)
         elif request.contentType == "pdf":
-            generated_content = await generate_pdf_content(request)
+            generated_content = await generate_pdf_content(request, content_id, storage_path)
         elif request.contentType == "ppt":
-            generated_content = await generate_ppt_content(request)
+            generated_content = await generate_ppt_content(request, content_id, storage_path)
         else:
             raise Exception(f"Unsupported content type: {request.contentType}")
         

@@ -28,6 +28,7 @@ from .cleanup_service import cleanup_service
 from openai import OpenAI
 import time
 import os
+import uuid
 
 # Initialize API router with tags (prefix handled in main.py)
 api_router = APIRouter(tags=["ICLeaF AI"])
@@ -202,9 +203,26 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
 
     # INTERNAL (RAG) mode
     if req.mode == "internal":
-        # Use enhanced RAG with cosine similarity threshold >= 0.1 and top-5 enforcement
-        hits = rag.query(req.message, top_k=min(req.top_k, 5), min_similarity=0.1)
+        # Apply metadata filters if provided (these are Optional fields in ChatRequest)
+        subject_id_filter = req.subjectId if req.subjectId else None
+        topic_id_filter = req.topicId if req.topicId else None
+        doc_name_filter = req.docName if req.docName else None
         
+        # Use enhanced RAG with cosine similarity threshold >= 0.1 and top-5 enforcement
+        hits = rag.query(
+            req.message, 
+            top_k=min(req.top_k, 5), 
+            min_similarity=0.1,
+            subject_id=subject_id_filter,
+            topic_id=topic_id_filter,
+            doc_name=doc_name_filter
+        )
+        
+        print(f"[CHATBOT] Internal mode query: '{req.message[:50]}...'")
+        print(f"[CHATBOT] Found {len(hits)} RAG hits")
+        print(f"[CHATBOT] Filters: subjectId={subject_id_filter}, topicId={topic_id_filter}, docName={doc_name_filter}")
+        
+        # Extract context from hits
         for i, h in enumerate(hits):
             meta = h.get("meta", {})
             chunk_id = f"chunk_{i}_{meta.get('filename', 'unknown')}"
@@ -221,50 +239,120 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                 )
             )
             
-            # Get text content - try multiple possible field names
-            text_content = h.get("text", "") or h.get("snippet", "") or h.get("document", "") or h.get("content", "")
+            # ChromaDB returns text in "text" field
+            text_content = h.get("text", "")
             
-            if text_content and len(text_content.strip()) > 5:  # Lower threshold
+            # Debug: Log the structure of hits
+            if i == 0:
+                print(f"[CHATBOT] Sample hit structure: keys={list(h.keys())}")
+                print(f"[CHATBOT] Sample hit text length: {len(text_content) if text_content else 0}")
+                print(f"[CHATBOT] Sample hit score: {relevance_score}")
+            
+            # Add text content if it exists and is meaningful
+            if text_content and isinstance(text_content, str) and len(text_content.strip()) > 10:
+                # Clean up the text content
+                text_content = text_content.strip()
+                # Remove excessive whitespace
+                text_content = " ".join(text_content.split())
                 context_blocks.append(text_content)
-
-        system_prompt = (
-            "You are ICLeaF LMS's internal-mode assistant. "
-            f"User role: {req.role}. Answer ONLY using the provided context. "
-            "If the answer is not in the context, say you don't know and suggest a follow‑up."
-        )
-        ctx = "\n\n".join([f"[Source {i+1}]\n{b}" for i, b in enumerate(context_blocks)]) if context_blocks else ""
-        messages: List[dict] = [{"role": "system", "content": system_prompt}]
-        if ctx:
-            messages.append({"role": "system", "content": f"Context for grounding:\n{ctx}"})
+                print(f"[CHATBOT] Added context block {len(context_blocks)}: {len(text_content)} chars, score: {relevance_score:.3f}")
+            else:
+                print(f"[CHATBOT] Skipped context block {i+1}: empty or too short (length: {len(text_content) if text_content else 0})")
         
-        # Add session history
-        for m in session_manager.get_history(req.sessionId, last=10):
-            # Convert datetime to string for JSON serialization
+        print(f"[CHATBOT] Total context blocks extracted: {len(context_blocks)}")
+        print(f"[CHATBOT] Total context length: {sum(len(b) for b in context_blocks)} characters")
+
+        # Build enhanced system prompt that emphasizes using context
+        system_prompt = f"""You are ICLeaF LMS's internal-mode assistant. Your role is to help {req.role}s learn from the provided document context.
+
+CRITICAL INSTRUCTIONS:
+1. You MUST answer using ONLY the information provided in the context below
+2. If the answer is clearly in the context, provide a detailed, helpful answer
+3. If the answer is partially in the context, provide what you can and note any limitations
+4. If the answer is NOT in the context, say "I couldn't find this information in the provided documents. Please try rephrasing your question or check if the topic is covered in the documents."
+5. Always cite which document/source you're using when possible
+6. Be helpful, clear, and educational in your responses
+
+User role: {req.role}
+Context from {len(context_blocks)} relevant document sections:"""
+
+        # Format context with clear source indicators
+        if context_blocks:
+            ctx_parts = []
+            for i, (block, source) in enumerate(zip(context_blocks, sources[:len(context_blocks)]), 1):
+                source_title = source.title or source.docName or f"Document {i}"
+                ctx_parts.append(f"[Source {i}: {source_title}]\n{block}")
+            ctx = "\n\n---\n\n".join(ctx_parts)
+        else:
+            ctx = "No relevant context found in the documents."
+        
+        # Build messages with clear context
+        messages: List[dict] = [
+            {
+                "role": "system", 
+                "content": f"{system_prompt}\n\n{ctx}\n\nNow answer the user's question using the context above."
+            }
+        ]
+        
+        # Add session history (last 5 messages to avoid token limit)
+        history_messages = session_manager.get_history(req.sessionId, last=5)
+        for m in history_messages:
+            # Convert to message format for OpenAI
             msg_dict = m.model_dump()
-            if 'timestamp' in msg_dict and msg_dict['timestamp']:
-                # Check if it's already a string
-                if not isinstance(msg_dict['timestamp'], str):
-                    msg_dict['timestamp'] = msg_dict['timestamp'].isoformat()
-            messages.append(msg_dict)
+            # Only include role and content for history
+            if msg_dict.get("role") and msg_dict.get("content"):
+                messages.append({
+                    "role": msg_dict["role"],
+                    "content": msg_dict["content"]
+                })
+        
+        # Add current user message
         messages.append({"role": "user", "content": req.message})
+        
+        print(f"[CHATBOT] Total messages in context: {len(messages)}")
+        print(f"[CHATBOT] Context length in system message: {len(ctx)} characters")
 
         if client is None:
-            answer = "LLM not configured (missing OPENAI_API_KEY)."
+            answer = (
+                "⚠️ OpenAI API key is not configured. "
+                "Please set OPENAI_API_KEY in your .env file and restart the server. "
+                "The API key should start with 'sk-' and be a valid OpenAI key."
+            )
         elif not context_blocks:
-            answer = "I couldn't find this in the internal documents. Try rephrasing or checking Cloud mode."
+            print(f"[CHATBOT] WARNING: No context blocks extracted from {len(hits)} hits")
+            if len(hits) > 0:
+                print(f"[CHATBOT] Debug: First hit keys: {list(hits[0].keys())}")
+                print(f"[CHATBOT] Debug: First hit text preview: {str(hits[0].get('text', 'N/A'))[:100]}...")
+            answer = (
+                f"I found {len(hits)} relevant document(s), but couldn't extract the content. "
+                "This might be a temporary issue. Please try rephrasing your question or check Cloud mode. "
+                f"If you provided filters (subjectId, topicId, docName), try removing them to search all documents."
+            )
         else:
             try:
+                print(f"[CHATBOT] Calling OpenAI API with {len(messages)} messages")
                 completion = client.chat.completions.create(
                     model=deps.OPENAI_MODEL,
                     messages=messages,
-                    temperature=0.1,
+                    temperature=0.1,  # Low temperature for more deterministic, context-based answers
+                    max_tokens=1000,  # Allow sufficient tokens for detailed answers
                 )
                 answer = completion.choices[0].message.content
+                print(f"[CHATBOT] Received answer: {len(answer)} characters")
             except Exception as e:
-                if "quota" in str(e).lower() or "insufficient_quota" in str(e).lower():
+                error_str = str(e)
+                if "Invalid API key" in error_str or "incorrect API key" in error_str.lower():
+                    answer = (
+                        "⚠️ Invalid OpenAI API key detected. "
+                        "Please check your .env file and ensure OPENAI_API_KEY is set correctly. "
+                        "The API key should start with 'sk-' and be a valid OpenAI key. "
+                        "After updating, restart the server."
+                    )
+                elif "quota" in error_str.lower() or "insufficient_quota" in error_str.lower():
                     answer = f"⚠️ OpenAI API quota exceeded. Here's a demo response based on your question: '{req.message}'\n\nBased on the available documents, I can provide information about data structures, Python programming, and related topics. Please check your OpenAI billing to restore full functionality."
                 else:
-                    answer = f"Error calling OpenAI API: {str(e)}"
+                    answer = f"⚠️ Error calling OpenAI API: {error_str}. Please check your API key and network connection."
+                print(f"[CHATBOT] Error during API call: {error_str}")
 
         # Store the assistant response in session history
         assistant_msg = SessionMessage(
@@ -369,16 +457,34 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     messages.append({"role": "user", "content": req.message})
 
     if client is None:
-        answer = "LLM not configured (missing OPENAI_API_KEY)."
-    else:
-        completion = client.chat.completions.create(
-            model=deps.OPENAI_MODEL,
-            messages=messages,
-            temperature=0.2,
+        answer = (
+            "⚠️ OpenAI API key is not configured. "
+            "Please set OPENAI_API_KEY in your .env file and restart the server. "
+            "The API key should start with 'sk-' and be a valid OpenAI key."
         )
-        answer = completion.choices[0].message.content
-        # Clean markdown formatting from chat response
-        answer = clean_markdown_formatting(answer)
+    else:
+        try:
+            completion = client.chat.completions.create(
+                model=deps.OPENAI_MODEL,
+                messages=messages,
+                temperature=0.2,
+            )
+            answer = completion.choices[0].message.content
+            # Clean markdown formatting from chat response
+            answer = clean_markdown_formatting(answer)
+        except Exception as e:
+            error_str = str(e)
+            if "Invalid API key" in error_str or "incorrect API key" in error_str.lower():
+                answer = (
+                    "⚠️ Invalid OpenAI API key detected. "
+                    "Please check your .env file and ensure OPENAI_API_KEY is set correctly. "
+                    "The API key should start with 'sk-' and be a valid OpenAI key. "
+                    "After updating, restart the server."
+                )
+            elif "quota" in error_str.lower() or "insufficient_quota" in error_str.lower():
+                answer = "⚠️ OpenAI API quota exceeded. Please check your OpenAI account billing to restore functionality."
+            else:
+                answer = f"⚠️ Error calling OpenAI API: {error_str}. Please check your API key and network connection."
 
     # Store the assistant response in session history
     assistant_msg = SessionMessage(
@@ -652,26 +758,37 @@ async def upload_file(
             uploads_dir = "./data/uploads"
             os.makedirs(uploads_dir, exist_ok=True)
             
-            # Save uploaded file
-            file_path = os.path.join(uploads_dir, file.filename)
+            # Generate unique filename to avoid conflicts
+            # Format: timestamp_uuid_original_filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            unique_id = str(uuid.uuid4())[:8]
+            safe_filename = os.path.basename(file.filename) if file.filename else "uploaded_file"
+            # Remove any path separators from filename for security
+            safe_filename = safe_filename.replace("/", "_").replace("\\", "_")
+            
+            # Create unique filename: timestamp_uuid_originalname.ext
+            # This preserves the original file extension and avoids conflicts
+            unique_filename = f"{timestamp}_{unique_id}_{safe_filename}"
+            file_path = os.path.join(uploads_dir, unique_filename)
+            
+            # Save uploaded file permanently
             with open(file_path, "wb") as buffer:
                 buffer.write(content)
             
-            # Process the file
+            print(f"[UPLOAD] Saved file to: {file_path} (original: {file.filename})")
+            
+            # Process the file for embedding
             result = embedding_service.embed_single_file(
                 file_path,
                 subjectId,
                 topicId,
-                file.filename,
+                file.filename,  # Use original filename for metadata
                 uploadedBy
             )
             
-            # Clean up uploaded file after processing
-            try:
-                os.remove(file_path)
-            except:
-                pass  # Ignore cleanup errors
-                
+            # File is kept in /uploads directory for future reference
+            # No cleanup - files persist as per requirement
+            
             return result
             
         except Exception as e:
@@ -960,7 +1077,8 @@ async def _process_content_generation(request: GenerateContentRequest, start_tim
                 contentId="",
                 userId=request.userId,
                 status="failed",
-                message="Flashcard config is required for flashcard content type"
+                message="Flashcard config is required for flashcard content type",
+                estimated_completion_time=None
             )
         elif request.contentType == "quiz" and not request.contentConfig.get('quiz'):
             return GenerateContentResponse(
@@ -968,7 +1086,8 @@ async def _process_content_generation(request: GenerateContentRequest, start_tim
                 contentId="",
                 userId=request.userId,
                 status="failed",
-                message="Quiz config is required for quiz content type"
+                message="Quiz config is required for quiz content type",
+                estimated_completion_time=None
             )
         elif request.contentType == "assessment" and not request.contentConfig.get('assessment'):
             return GenerateContentResponse(
@@ -976,7 +1095,8 @@ async def _process_content_generation(request: GenerateContentRequest, start_tim
                 contentId="",
                 userId=request.userId,
                 status="failed",
-                message="Assessment config is required for assessment content type"
+                message="Assessment config is required for assessment content type",
+                estimated_completion_time=None
             )
         elif request.contentType == "video" and not request.contentConfig.get('video'):
             return GenerateContentResponse(
@@ -984,7 +1104,8 @@ async def _process_content_generation(request: GenerateContentRequest, start_tim
                 contentId="",
                 userId=request.userId,
                 status="failed",
-                message="Video config is required for video content type"
+                message="Video config is required for video content type",
+                estimated_completion_time=None
             )
         elif request.contentType == "audio" and not request.contentConfig.get('audio'):
             return GenerateContentResponse(
@@ -992,7 +1113,8 @@ async def _process_content_generation(request: GenerateContentRequest, start_tim
                 contentId="",
                 userId=request.userId,
                 status="failed",
-                message="Audio config is required for audio content type"
+                message="Audio config is required for audio content type",
+                estimated_completion_time=None
             )
         elif request.contentType == "compiler" and not request.contentConfig.get('compiler'):
             return GenerateContentResponse(
@@ -1000,7 +1122,8 @@ async def _process_content_generation(request: GenerateContentRequest, start_tim
                 contentId="",
                 userId=request.userId,
                 status="failed",
-                message="Compiler config is required for compiler content type"
+                message="Compiler config is required for compiler content type",
+                estimated_completion_time=None
             )
         elif request.contentType == "pdf" and not request.contentConfig.get('pdf'):
             return GenerateContentResponse(
@@ -1008,7 +1131,8 @@ async def _process_content_generation(request: GenerateContentRequest, start_tim
                 contentId="",
                 userId=request.userId,
                 status="failed",
-                message="PDF config is required for PDF content type"
+                message="PDF config is required for PDF content type",
+                estimated_completion_time=None
             )
         elif request.contentType == "ppt" and not request.contentConfig.get('ppt'):
             return GenerateContentResponse(
@@ -1016,7 +1140,8 @@ async def _process_content_generation(request: GenerateContentRequest, start_tim
                 contentId="",
                 userId=request.userId,
                 status="failed",
-                message="PPT config is required for PPT content type"
+                message="PPT config is required for PPT content type",
+                estimated_completion_time=None
             )
         
         # Process content generation
@@ -1040,16 +1165,20 @@ async def _process_content_generation(request: GenerateContentRequest, start_tim
             userId=request.userId,
             status=content.status,
             message=f"Content generation started for {request.contentType}",
-            etaSeconds=estimated_time
+            estimated_completion_time=estimated_time  # Use the alias name
         )
         
     except Exception as e:
+        import traceback
+        print(f"[ERROR] Content generation failed: {str(e)}")
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
         return GenerateContentResponse(
             success=False,
             contentId="",
             userId=request.userId,
             status="failed",
-            message=f"Error generating content: {str(e)}"
+            message=f"Error generating content: {str(e)}",
+            estimated_completion_time=None
         )
 
 @api_router.get("/content/list", response_model=ContentListResponse)
@@ -1086,6 +1215,13 @@ def list_content(
             totalRecords=total_count,
             recordsPerPage=limit
         )
+        
+        # Normalize file paths (convert Windows backslashes to forward slashes)
+        from pathlib import Path
+        for content_item in paginated_content:
+            if content_item.filePath:
+                # Convert to POSIX path format
+                content_item.filePath = Path(content_item.filePath).as_posix()
         
         return ContentListResponse(
             success=True,
