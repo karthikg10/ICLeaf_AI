@@ -26,3 +26,13 @@ backend/data/chroma/
 # OS
 .DS_Store
 Thumbs.db
+
+# Environment and runtime files
+backend/.env
+backend/server.pid
+backend/server*.log
+
+# Test data
+backend/data/content/test_*/
+backend/data/uploads/
+*.txt
