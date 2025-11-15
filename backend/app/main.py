@@ -71,8 +71,8 @@ async def _preload_docs():
     
     # Initialize rate limiter
     try:
-        await FastAPILimiter.init()
-        print("[startup] Rate limiter initialized")
+        # await FastAPILimiter.init()
+        print("[startup] Rate limiter disabled for development")
     except Exception as e:
         print(f"[startup] Rate limiter initialization failed: {e}")
         print("[startup] Continuing without rate limiting...")
@@ -301,6 +301,35 @@ def _build_pptx_bytes(
     prs.save(bio)
     return bio.getvalue()
 
+
+
+# ========== UVICORN ENTRY POINT ==========
+# Required for running: python backend/app/main.py
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    # Get configuration from environment or use defaults
+    host = os.getenv("BACKEND_HOST", "0.0.0.0")  # Bind to all interfaces
+    port = int(os.getenv("BACKEND_PORT", 8000))
+    reload = os.getenv("RELOAD", "true").lower() == "true"
+    
+    print("\n" + "="*70)
+    print("🚀 Starting ICLeaF LMS AI Backend Server")
+    print("="*70)
+    print(f"📍 Host: {host}")
+    print(f"📍 Port: {port}")
+    print(f"🔄 Auto-reload: {reload}")
+    print(f"📚 Docs: http://localhost:{port}/docs")
+    print("="*70 + "\n")
+    
+    uvicorn.run(
+        "app.main:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info"
+    )
 
 
 

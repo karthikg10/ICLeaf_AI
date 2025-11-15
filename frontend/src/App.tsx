@@ -8,7 +8,7 @@ import ContentPage from "./components/ContentPage";
 type Role = "student" | "teacher" | "admin";
 type Mode = "internal" | "external";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8001";
+const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 export default function App() {
   const [role, setRole] = useState<Role>("student");

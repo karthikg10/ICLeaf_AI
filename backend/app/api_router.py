@@ -30,6 +30,10 @@ import time
 import os
 import uuid
 
+
+# Disable ChromaDB telemetry
+os.environ["CHROMA_TELEMETRY_ENABLED"] = "False"
+
 # Initialize API router with tags (prefix handled in main.py)
 api_router = APIRouter(tags=["ICLeaF AI"])
 
@@ -131,7 +135,7 @@ def internal_search(
     """
     Enhanced internal search with metadata filtering.
     """
-    hits = rag.query(q, top_k=min(top_k, 5), min_similarity=0.1)
+    hits = rag.query(q, top_k=min(top_k, 5), min_similarity=-0.2)
     results = []
     
     for h in hits:
@@ -174,8 +178,9 @@ async def chatbot_query(req: ChatRequest = Body(...)):
     Main chatbot endpoint that handles both internal and cloud modes.
     Enforces 10-second timeout as per API spec.
     """
+    print("Hello from chatbot_query.")
     start_time = time.time()
-    
+    print(f"[CHATBOT] Received query: '{req.message[:50]}...' in mode: {req.mode}")
     try:
         # Wrap the entire processing in a 10-second timeout
         result = await asyncio.wait_for(
@@ -188,6 +193,7 @@ async def chatbot_query(req: ChatRequest = Body(...)):
 
 async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatResponse:
     """Process the chatbot query with proper error handling."""
+    print
     sources: List[Source] = []
     context_blocks: List[str] = []
 
@@ -200,161 +206,222 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         docName=req.docName
     )
     session_manager.append_history(req.sessionId, user_msg)
+    # INTERNAL (RAG) mode - FIXED VERSION
 
     # INTERNAL (RAG) mode
     if req.mode == "internal":
-        # Apply metadata filters if provided (these are Optional fields in ChatRequest)
+        # Apply metadata filters if provided
         subject_id_filter = req.subjectId if req.subjectId else None
         topic_id_filter = req.topicId if req.topicId else None
         doc_name_filter = req.docName if req.docName else None
-        
-        # Use enhanced RAG with cosine similarity threshold >= 0.1 and top-5 enforcement
+
+        # Query RAG store
         hits = rag.query(
-            req.message, 
-            top_k=min(req.top_k, 5), 
+            req.message,
+            top_k=min(req.top_k, 5),
             min_similarity=0.1,
             subject_id=subject_id_filter,
             topic_id=topic_id_filter,
             doc_name=doc_name_filter
         )
-        
+
         print(f"[CHATBOT] Internal mode query: '{req.message[:50]}...'")
         print(f"[CHATBOT] Found {len(hits)} RAG hits")
-        print(f"[CHATBOT] Filters: subjectId={subject_id_filter}, topicId={topic_id_filter}, docName={doc_name_filter}")
+
+        # ===== FIX #1: Extract context FIRST, validate, THEN add source =====
+        # ===== FIX #2: Deduplicate sources by document name =====
         
-        # Extract context from hits
+        seen_documents = {}  # Track documents we've already added as sources
+        
         for i, h in enumerate(hits):
             meta = h.get("meta", {})
-            chunk_id = f"chunk_{i}_{meta.get('filename', 'unknown')}"
+            text_content = h.get("text", "")
+            filename = meta.get("filename", "unknown")
             relevance_score = h.get("score", 0.0)
             
-            sources.append(
-                Source(
+            # STEP 1: Validate text content EXISTS and has meaningful length
+            if not text_content or not isinstance(text_content, str):
+                print(f"[CHATBOT] Skipped hit {i+1}: No text content")
+                continue
+                
+            # Clean up text
+            text_content = text_content.strip()
+            if not text_content:
+                print(f"[CHATBOT] Skipped hit {i+1}: Empty after strip")
+                continue
+            
+            # Remove excessive whitespace but keep all content
+            text_content = " ".join(text_content.split())
+            
+            # STEP 2: Add context block (synchronized with source)
+            context_blocks.append(text_content)
+            print(f"[CHATBOT] Added context block {len(context_blocks)}: {len(text_content)} chars, score: {relevance_score:.3f}")
+            
+            # STEP 3: Add source ONLY if we haven't seen this document before
+            # This deduplicate sources by document name
+            if filename not in seen_documents:
+                chunk_id = f"chunk_{i}_{filename}"
+                source = Source(
                     title=meta.get("title", meta.get("filename", "Document")),
                     url=meta.get("url"),
                     score=relevance_score,
                     chunkId=chunk_id,
-                    docName=meta.get("filename"),
+                    docName=filename,
                     relevanceScore=relevance_score
                 )
-            )
-            
-            # ChromaDB returns text in "text" field
-            text_content = h.get("text", "")
-            
-            # Debug: Log the structure of hits
-            if i == 0:
-                print(f"[CHATBOT] Sample hit structure: keys={list(h.keys())}")
-                print(f"[CHATBOT] Sample hit text length: {len(text_content) if text_content else 0}")
-                print(f"[CHATBOT] Sample hit score: {relevance_score}")
-            
-            # Add text content if it exists and is meaningful
-            if text_content and isinstance(text_content, str) and len(text_content.strip()) > 10:
-                # Clean up the text content
-                text_content = text_content.strip()
-                # Remove excessive whitespace
-                text_content = " ".join(text_content.split())
-                context_blocks.append(text_content)
-                print(f"[CHATBOT] Added context block {len(context_blocks)}: {len(text_content)} chars, score: {relevance_score:.3f}")
+                sources.append(source)
+                seen_documents[filename] = True
+                print(f"[CHATBOT] Added unique source: {filename}")
             else:
-                print(f"[CHATBOT] Skipped context block {i+1}: empty or too short (length: {len(text_content) if text_content else 0})")
-        
-        print(f"[CHATBOT] Total context blocks extracted: {len(context_blocks)}")
-        print(f"[CHATBOT] Total context length: {sum(len(b) for b in context_blocks)} characters")
+                print(f"[CHATBOT] Skipped duplicate source: {filename} (already in sources)")
 
-        # Build enhanced system prompt that emphasizes using context
-        system_prompt = f"""You are ICLeaF LMS's internal-mode assistant. Your role is to help {req.role}s learn from the provided document context.
+        print(f"[CHATBOT] Total context blocks: {len(context_blocks)}")
+        print(f"[CHATBOT] Total unique sources: {len(sources)}")
+        print(f"[CHATBOT] Total context length: {sum(len(b) for b in context_blocks)} chars")
 
-CRITICAL INSTRUCTIONS:
-1. You MUST answer using ONLY the information provided in the context below
-2. If the answer is clearly in the context, provide a detailed, helpful answer
-3. If the answer is partially in the context, provide what you can and note any limitations
-4. If the answer is NOT in the context, say "I couldn't find this information in the provided documents. Please try rephrasing your question or check if the topic is covered in the documents."
-5. Always cite which document/source you're using when possible
-6. Be helpful, clear, and educational in your responses
-
-User role: {req.role}
-Context from {len(context_blocks)} relevant document sections:"""
-
-        # Format context with clear source indicators
+        # ===== FIX #3: Always build context, with fallback for empty blocks =====
         if context_blocks:
+            # Build context with sources
             ctx_parts = []
-            for i, (block, source) in enumerate(zip(context_blocks, sources[:len(context_blocks)]), 1):
-                source_title = source.title or source.docName or f"Document {i}"
-                ctx_parts.append(f"[Source {i}: {source_title}]\n{block}")
+            for i, block in enumerate(context_blocks, 1):
+                # Find the corresponding source (should be unique now)
+                # Since we deduplicated, we need to handle multiple blocks per source
+                
+                # For now, number the blocks and include them
+                ctx_parts.append(f"[Content Block {i}]\n{block}")
             ctx = "\n\n---\n\n".join(ctx_parts)
         else:
+            # Only use this message if we found NO valid content
             ctx = "No relevant context found in the documents."
-        
-        # Build messages with clear context
+
+        # Build system prompt with context
+        system_prompt = f"""You are ICLeaF LMS's internal-mode assistant helping students learn from documents.
+
+    INSTRUCTIONS:
+    1. Answer ONLY using the provided context below
+    2. Be helpful and educational
+    3. Cite the sources
+    4. If context is provided but seems insufficient, still give your best answer based on it
+
+    CONTEXT ({len(context_blocks)} blocks, {len(sources)} sources):
+    {ctx}
+
+    Now answer the user's question:"""
+
+    #     system_prompt = f"""You are ICLeaF LMS's internal-mode assistant. Your role is to help {req.role}s learn from the provided document context.
+
+    # CRITICAL INSTRUCTIONS:
+
+    # 1. You MUST answer ONLY using the information provided in the context below
+
+    # 2. If the answer is in the context, provide a detailed, helpful answer citing the source
+
+    # 3. If the answer is partially in context, provide what you can and note any limitations
+
+    # 4. If the answer is NOT in the context, say: "I couldn't find this information in the provided documents. Please try rephrasing your question."
+
+    # 5. Always cite your sources
+
+    # 6. Be helpful, clear, and educational
+
+    # PROVIDED CONTEXT ({len(context_blocks)} content blocks from {len(sources)} unique documents):
+
+    # {ctx}
+
+    # Now answer the user's question USING ONLY the context above."""
+
+        # Build messages list
         messages: List[dict] = [
-            {
-                "role": "system", 
-                "content": f"{system_prompt}\n\n{ctx}\n\nNow answer the user's question using the context above."
-            }
+            {"role": "system", "content": system_prompt}
         ]
-        
-        # Add session history (last 5 messages to avoid token limit)
+
+        # Add session history (last 5 messages)
         history_messages = session_manager.get_history(req.sessionId, last=5)
         for m in history_messages:
-            # Convert to message format for OpenAI
             msg_dict = m.model_dump()
-            # Only include role and content for history
             if msg_dict.get("role") and msg_dict.get("content"):
                 messages.append({
                     "role": msg_dict["role"],
                     "content": msg_dict["content"]
                 })
-        
+
         # Add current user message
         messages.append({"role": "user", "content": req.message})
-        
-        print(f"[CHATBOT] Total messages in context: {len(messages)}")
-        print(f"[CHATBOT] Context length in system message: {len(ctx)} characters")
 
+        print(f"[CHATBOT] Total messages: {len(messages)}")
+        print(f"[CHATBOT] Context length: {len(ctx)} chars")
+        print(f"[CHATBOT] Unique sources: {len(sources)}")
+
+        # Call OpenAI API
         if client is None:
             answer = (
                 "⚠️ OpenAI API key is not configured. "
-                "Please set OPENAI_API_KEY in your .env file and restart the server. "
-                "The API key should start with 'sk-' and be a valid OpenAI key."
+                "Please set OPENAI_API_KEY in your .env file and restart the server."
             )
         elif not context_blocks:
-            print(f"[CHATBOT] WARNING: No context blocks extracted from {len(hits)} hits")
-            if len(hits) > 0:
-                print(f"[CHATBOT] Debug: First hit keys: {list(hits[0].keys())}")
-                print(f"[CHATBOT] Debug: First hit text preview: {str(hits[0].get('text', 'N/A'))[:100]}...")
             answer = (
-                f"I found {len(hits)} relevant document(s), but couldn't extract the content. "
-                "This might be a temporary issue. Please try rephrasing your question or check Cloud mode. "
-                f"If you provided filters (subjectId, topicId, docName), try removing them to search all documents."
+                f"I found {len(hits)} relevant document chunk(s), but couldn't extract meaningful content from them. "
+                "This might be a temporary issue. Please try rephrasing your question or checking if the topic is covered in the documents."
             )
         else:
             try:
-                print(f"[CHATBOT] Calling OpenAI API with {len(messages)} messages")
+                print(f"[CHATBOT] Calling OpenAI API with {len(messages)} messages...")
                 completion = client.chat.completions.create(
                     model=deps.OPENAI_MODEL,
                     messages=messages,
-                    temperature=0.1,  # Low temperature for more deterministic, context-based answers
-                    max_tokens=1000,  # Allow sufficient tokens for detailed answers
+                    temperature=0.3,
+                    max_tokens=1000,
                 )
-                answer = completion.choices[0].message.content
-                print(f"[CHATBOT] Received answer: {len(answer)} characters")
+                
+                # CORRECT: Extract from the nested structure
+                choice = completion.choices[0]  # Get first choice from list
+                message = choice.message
+                answer = message.content
+                
+                # Validation
+                if not answer:
+                    answer = "⚠️ OpenAI returned an empty response. Please try again."
+                    print(f"[CHATBOT] WARNING: Empty response from OpenAI")
+                else:
+                    print(f"[CHATBOT] Received answer: {len(answer)} characters")
+                    
+            except IndexError:
+                print(f"[CHATBOT] No choices in response")
+                answer = "⚠️ OpenAI returned no response choices. Please try again."
+                
+            except AttributeError as e:
+                print(f"[CHATBOT] Response structure error: {e}")
+                print(f"[CHATBOT] Response: {completion}")
+                answer = f"⚠️ Error extracting response: {str(e)}"
+                
             except Exception as e:
                 error_str = str(e)
-                if "Invalid API key" in error_str or "incorrect API key" in error_str.lower():
-                    answer = (
-                        "⚠️ Invalid OpenAI API key detected. "
-                        "Please check your .env file and ensure OPENAI_API_KEY is set correctly. "
-                        "The API key should start with 'sk-' and be a valid OpenAI key. "
-                        "After updating, restart the server."
-                    )
-                elif "quota" in error_str.lower() or "insufficient_quota" in error_str.lower():
-                    answer = f"⚠️ OpenAI API quota exceeded. Here's a demo response based on your question: '{req.message}'\n\nBased on the available documents, I can provide information about data structures, Python programming, and related topics. Please check your OpenAI billing to restore full functionality."
-                else:
-                    answer = f"⚠️ Error calling OpenAI API: {error_str}. Please check your API key and network connection."
-                print(f"[CHATBOT] Error during API call: {error_str}")
+                print(f"[CHATBOT] API Error: {error_str}")
+    
+ 
 
-        # Store the assistant response in session history
+            
+            # try:
+            #     print(f"[CHATBOT] Calling OpenAI API with {len(messages)} messages...")
+            #     completion = client.chat.completions.create(
+            #         model=deps.OPENAI_MODEL,
+            #         messages=messages,
+            #         temperature=0.3,  # Low temp for consistent, context-based answers
+            #         max_tokens=1000,
+            #     )
+            #     answer = completion.choices.message.content
+            #     print(f"[CHATBOT] Received answer: {len(answer)} characters")
+            # except Exception as e:
+            #     error_str = str(e)
+            #     if "Invalid API key" in error_str or "incorrect API key" in error_str.lower():
+            #         answer = "⚠️ Invalid OpenAI API key. Please check your .env file."
+            #     elif "quota" in error_str.lower():
+            #         answer = "⚠️ OpenAI API quota exceeded. Please check your billing."
+            #     else:
+            #         answer = f"⚠️ Error calling OpenAI: {error_str}"
+            #     print(f"[CHATBOT] API Error: {error_str}")
+
+        # Store assistant response
         assistant_msg = SessionMessage(
             role="assistant",
             content=answer,
@@ -364,7 +431,7 @@ Context from {len(context_blocks)} relevant document sections:"""
         )
         session_manager.append_history(req.sessionId, assistant_msg)
 
-        # Track conversation for analytics
+        # Track conversation
         response_time = time.time() - start_time
         conversation = Conversation(
             sessionId=req.sessionId,
@@ -377,17 +444,407 @@ Context from {len(context_blocks)} relevant document sections:"""
             aiResponse=answer,
             sources=sources,
             responseTime=response_time,
-            tokenCount=len(answer.split())  # Approximate token count
+            tokenCount=len(answer.split())
         )
         conversation_manager.add_conversation(conversation)
 
         return ChatResponse(
-            answer=answer, 
-            sources=sources, 
-            sessionId=req.sessionId, 
+            answer=answer,
+            sources=sources,
+            sessionId=req.sessionId,
             userId=req.userId,
             mode=req.mode
-        )
+    )
+
+
+    # if req.mode == "internal":
+    #     # Apply metadata filters if provided
+    #     subject_id_filter = req.subjectId if req.subjectId else None
+    #     topic_id_filter = req.topicId if req.topicId else None
+    #     doc_name_filter = req.docName if req.docName else None
+        
+    #     # Query RAG store
+    #     hits = rag.query(
+    #         req.message,
+    #         top_k=min(req.top_k, 5),
+    #         min_similarity=0.1,
+    #         subject_id=subject_id_filter,
+    #         topic_id=topic_id_filter,
+    #         doc_name=doc_name_filter
+    #     )
+        
+    #     print(f"[CHATBOT] Internal mode query: '{req.message[:50]}...'")
+    #     print(f"[CHATBOT] Found {len(hits)} RAG hits")
+        
+
+
+    #     # Extract context from hits - SYNCHRONIZED
+    #     for i, h in enumerate(hits):
+    #         meta = h.get("meta", {})
+    #         text_content = h.get("text", "")
+            
+    #         # Validate text content BEFORE adding source
+    #         if text_content and isinstance(text_content, str) and len(text_content.strip()) > 0:
+    #             # Clean up the text content
+    #             text_content = text_content.strip()
+    #             text_content = " ".join(text_content.split())
+                
+    #             # Add to context blocks
+    #             context_blocks.append(text_content)
+                
+    #             # NOW add corresponding source (synchronized)
+    #             chunk_id = f"chunk_{i}_{meta.get('filename', 'unknown')}"
+    #             relevance_score = h.get("score", 0.0)
+    #             sources.append(
+    #                 Source(
+    #                     title=meta.get("title", meta.get("filename", "Document")),
+    #                     url=meta.get("url"),
+    #                     score=relevance_score,
+    #                     chunkId=chunk_id,
+    #                     docName=meta.get("filename"),
+    #                     relevanceScore=relevance_score
+    #                 )
+    #             )
+    #             print(f"[CHATBOT] Added context block {len(context_blocks)}: {len(text_content)} chars, score: {relevance_score:.3f}")
+    #         else:
+    #             print(f"[CHATBOT] Skipped hit {i+1}: text length = {len(text_content.strip() if text_content else '')}, threshold = 0")
+
+    #     print(f"[CHATBOT] Total context blocks extracted: {len(context_blocks)}")
+    #     print(f"[CHATBOT] Total sources extracted: {len(sources)}")
+
+    #     # Extract context from hits
+    #     # for i, h in enumerate(hits):
+    #     #     meta = h.get("meta", {})
+    #     #     chunk_id = f"chunk_{i}_{meta.get('filename', 'unknown')}"
+    #     #     relevance_score = h.get("score", 0.0)
+            
+    #     #     sources.append(
+    #     #         Source(
+    #     #             title=meta.get("title", meta.get("filename", "Document")),
+    #     #             url=meta.get("url"),
+    #     #             score=relevance_score,
+    #     #             chunkId=chunk_id,
+    #     #             docName=meta.get("filename"),
+    #     #             relevanceScore=relevance_score
+    #     #         )
+    #     #     )
+            
+    #     #     # Extract text content
+    #     #     text_content = h.get("text", "")
+            
+    #     #     # Add text content if it exists and is meaningful
+    #     #     if text_content and isinstance(text_content, str) and len(text_content.strip()) > 10:
+    #     #         text_content = text_content.strip()
+    #     #         text_content = " ".join(text_content.split())
+    #     #         context_blocks.append(text_content)
+    #     #         print(f"[CHATBOT] Added context block: {len(text_content)} chars")
+        
+    #     # print(f"[CHATBOT] Total context blocks: {len(context_blocks)}")
+    #     # print(f"[CHATBOT] Total context length: {sum(len(b) for b in context_blocks)} chars")
+        
+    #     # ===== CRITICAL FIX: BUILD CONTEXT FIRST, THEN SYSTEM PROMPT =====
+    #     # Build context string FIRST
+    #     if context_blocks:
+    #         ctx_parts = []
+    #         for i, (block, source) in enumerate(zip(context_blocks, sources[:len(context_blocks)]), 1):
+    #             source_title = source.title or source.docName or f"Document {i}"
+    #             ctx_parts.append(f"[Source {i}: {source_title}]\n{block}")
+    #         ctx = "\n\n---\n\n".join(ctx_parts)
+    #     else:
+    #         ctx = "No relevant context found in the documents."
+        
+    #     # THEN build the complete system prompt with context included
+    #     system_prompt = f"""You are ICLeaF LMS's internal-mode assistant. Your role is to help {req.role}s learn from the provided document context.
+
+    # CRITICAL INSTRUCTIONS:
+    # 1. You MUST answer ONLY using the information provided in the context below
+    # 2. If the answer is in the context, provide a detailed, helpful answer citing the source
+    # 3. If the answer is partially in context, provide what you can and note any limitations
+    # 4. If the answer is NOT in the context, say: "I couldn't find this information in the provided documents. Please try rephrasing your question."
+    # 5. Always cite your sources using [Source X] notation
+    # 6. Be helpful, clear, and educational
+
+    # PROVIDED CONTEXT:
+    # {ctx}
+
+    # Now answer the user's question USING ONLY the context above."""
+
+    #     # Build messages list
+    #     messages: List[dict] = [
+    #         {"role": "system", "content": system_prompt}
+    #     ]
+        
+    #     # Add session history (last 5 messages)
+    #     history_messages = session_manager.get_history(req.sessionId, last=5)
+    #     for m in history_messages:
+    #         msg_dict = m.model_dump()
+    #         if msg_dict.get("role") and msg_dict.get("content"):
+    #             messages.append({
+    #                 "role": msg_dict["role"],
+    #                 "content": msg_dict["content"]
+    #             })
+        
+    #     # Add current user message
+    #     messages.append({"role": "user", "content": req.message})
+        
+    #     print(f"[CHATBOT] Total messages: {len(messages)}, Context length: {len(ctx)} chars")
+        
+    #     # Call OpenAI API
+    #     if client is None:
+    #         answer = (
+    #             "⚠️ OpenAI API key is not configured. "
+    #             "Please set OPENAI_API_KEY in your .env file and restart the server."
+    #         )
+    #     elif not context_blocks:
+    #         answer = (
+    #             f"I found {len(hits)} relevant document(s), but couldn't extract meaningful content from them. "
+    #             "This might be a temporary issue. Please try rephrasing your question or checking if the topic is covered in the documents."
+    #         )
+    #     else:
+    #         try:
+    #             print(f"[CHATBOT] Calling OpenAI API with {len(messages)} messages...")
+    #             completion = client.chat.completions.create(
+    #                 model=deps.OPENAI_MODEL,
+    #                 messages=messages,
+    #                 temperature=0.3,  # Low temp for consistent, context-based answers
+    #                 max_tokens=1000,
+    #             )
+    #             answer = completion.choices[0].message.content
+    #             print(f"[CHATBOT] Received answer: {len(answer)} characters")
+    #         except Exception as e:
+    #             error_str = str(e)
+    #             if "Invalid API key" in error_str or "incorrect API key" in error_str.lower():
+    #                 answer = "⚠️ Invalid OpenAI API key. Please check your .env file."
+    #             elif "quota" in error_str.lower():
+    #                 answer = "⚠️ OpenAI API quota exceeded. Please check your billing."
+    #             else:
+    #                 answer = f"⚠️ Error calling OpenAI: {error_str}"
+    #             print(f"[CHATBOT] API Error: {error_str}")
+        
+    #     # Store assistant response
+    #     assistant_msg = SessionMessage(
+    #         role="assistant",
+    #         content=answer,
+    #         subjectId=user_msg.subjectId,
+    #         topicId=user_msg.topicId,
+    #         docName=user_msg.docName
+    #     )
+    #     session_manager.append_history(req.sessionId, assistant_msg)
+        
+    #     # Track conversation
+    #     response_time = time.time() - start_time
+    #     conversation = Conversation(
+    #         sessionId=req.sessionId,
+    #         userId=req.userId,
+    #         mode=req.mode,
+    #         subjectId=req.subjectId,
+    #         topicId=req.topicId,
+    #         docName=req.docName,
+    #         userMessage=req.message,
+    #         aiResponse=answer,
+    #         sources=sources,
+    #         responseTime=response_time,
+    #         tokenCount=len(answer.split())
+    #     )
+    #     conversation_manager.add_conversation(conversation)
+        
+    #     return ChatResponse(
+    #         answer=answer,
+    #         sources=sources,
+    #         sessionId=req.sessionId,
+    #         userId=req.userId,
+    #         mode=req.mode
+    #     )
+
+    #AVINASH-Start
+#     # INTERNAL (RAG) mode
+#     if req.mode == "internal":
+#         # Apply metadata filters if provided (these are Optional fields in ChatRequest)
+#         subject_id_filter = req.subjectId if req.subjectId else None
+#         topic_id_filter = req.topicId if req.topicId else None
+#         doc_name_filter = req.docName if req.docName else None
+        
+#         # Use enhanced RAG with cosine similarity threshold >= 0.1 and top-5 enforcement
+#         hits = rag.query(
+#             req.message, 
+#             top_k=min(req.top_k, 5), 
+#             min_similarity=0.1,
+#             subject_id=subject_id_filter,
+#             topic_id=topic_id_filter,
+#             doc_name=doc_name_filter
+#         )
+        
+#         print(f"[CHATBOT] Internal mode query: '{req.message[:50]}...'")
+#         print(f"[CHATBOT] Found {len(hits)} RAG hits")
+#         print(f"[CHATBOT] Filters: subjectId={subject_id_filter}, topicId={topic_id_filter}, docName={doc_name_filter}")
+        
+#         # Extract context from hits
+#         for i, h in enumerate(hits):
+#             meta = h.get("meta", {})
+#             chunk_id = f"chunk_{i}_{meta.get('filename', 'unknown')}"
+#             relevance_score = h.get("score", 0.0)
+            
+#             sources.append(
+#                 Source(
+#                     title=meta.get("title", meta.get("filename", "Document")),
+#                     url=meta.get("url"),
+#                     score=relevance_score,
+#                     chunkId=chunk_id,
+#                     docName=meta.get("filename"),
+#                     relevanceScore=relevance_score
+#                 )
+#             )
+            
+#             # ChromaDB returns text in "text" field
+#             text_content = h.get("text", "")
+            
+#             # Debug: Log the structure of hits
+#             if i == 0:
+#                 print(f"[CHATBOT] Sample hit structure: keys={list(h.keys())}")
+#                 print(f"[CHATBOT] Sample hit text length: {len(text_content) if text_content else 0}")
+#                 print(f"[CHATBOT] Sample hit score: {relevance_score}")
+            
+#             # Add text content if it exists and is meaningful
+#             if text_content and isinstance(text_content, str) and len(text_content.strip()) > 10:
+#                 # Clean up the text content
+#                 text_content = text_content.strip()
+#                 # Remove excessive whitespace
+#                 text_content = " ".join(text_content.split())
+#                 context_blocks.append(text_content)
+#                 print(f"[CHATBOT] Added context block {len(context_blocks)}: {len(text_content)} chars, score: {relevance_score:.3f}")
+#             else:
+#                 print(f"[CHATBOT] Skipped context block {i+1}: empty or too short (length: {len(text_content) if text_content else 0})")
+        
+#         print(f"[CHATBOT] Total context blocks extracted: {len(context_blocks)}")
+#         print(f"[CHATBOT] Total context length: {sum(len(b) for b in context_blocks)} characters")
+
+#         # Build enhanced system prompt that emphasizes using context
+#         system_prompt = f"""You are ICLeaF LMS's internal-mode assistant. Your role is to help {req.role}s learn from the provided document context.
+
+# CRITICAL INSTRUCTIONS:
+# 1. You MUST answer using ONLY the information provided in the context below
+# 2. If the answer is clearly in the context, provide a detailed, helpful answer
+# 3. If the answer is partially in the context, provide what you can and note any limitations
+# 4. If the answer is NOT in the context, say "I couldn't find this information in the provided documents. Please try rephrasing your question or check if the topic is covered in the documents."
+# 5. Always cite which document/source you're using when possible
+# 6. Be helpful, clear, and educational in your responses
+
+# User role: {req.role}
+# Context from {len(context_blocks)} relevant document sections:"""
+
+#         # Format context with clear source indicators
+#         if context_blocks:
+#             ctx_parts = []
+#             for i, (block, source) in enumerate(zip(context_blocks, sources[:len(context_blocks)]), 1):
+#                 source_title = source.title or source.docName or f"Document {i}"
+#                 ctx_parts.append(f"[Source {i}: {source_title}]\n{block}")
+#             ctx = "\n\n---\n\n".join(ctx_parts)
+#         else:
+#             ctx = "No relevant context found in the documents."
+        
+#         # Build messages with clear context
+#         messages: List[dict] = [
+#             {
+#                 "role": "system", 
+#                 "content": f"{system_prompt}\n\n{ctx}\n\nNow answer the user's question using the context above."
+#             }
+#         ]
+        
+#         # Add session history (last 5 messages to avoid token limit)
+#         history_messages = session_manager.get_history(req.sessionId, last=5)
+#         for m in history_messages:
+#             # Convert to message format for OpenAI
+#             msg_dict = m.model_dump()
+#             # Only include role and content for history
+#             if msg_dict.get("role") and msg_dict.get("content"):
+#                 messages.append({
+#                     "role": msg_dict["role"],
+#                     "content": msg_dict["content"]
+#                 })
+        
+#         # Add current user message
+#         messages.append({"role": "user", "content": req.message})
+        
+#         print(f"[CHATBOT] Total messages in context: {len(messages)}")
+#         print(f"[CHATBOT] Context length in system message: {len(ctx)} characters")
+
+#         if client is None:
+#             answer = (
+#                 "⚠️ OpenAI API key is not configured. "
+#                 "Please set OPENAI_API_KEY in your .env file and restart the server. "
+#                 "The API key should start with 'sk-' and be a valid OpenAI key."
+#             )
+#         elif not context_blocks:
+#             print(f"[CHATBOT] WARNING: No context blocks extracted from {len(hits)} hits")
+#             if len(hits) > 0:
+#                 print(f"[CHATBOT] Debug: First hit keys: {list(hits[0].keys())}")
+#                 print(f"[CHATBOT] Debug: First hit text preview: {str(hits[0].get('text', 'N/A'))[:100]}...")
+#             answer = (
+#                 f"I found {len(hits)} relevant document(s), but couldn't extract the content. "
+#                 "This might be a temporary issue. Please try rephrasing your question or check Cloud mode. "
+#                 f"If you provided filters (subjectId, topicId, docName), try removing them to search all documents."
+#             )
+#         else:
+#             try:
+#                 print(f"[CHATBOT] Calling OpenAI API with {len(messages)} messages")
+#                 completion = client.chat.completions.create(
+#                     model=deps.OPENAI_MODEL,
+#                     messages=messages,
+#                     temperature=0.1,  # Low temperature for more deterministic, context-based answers
+#                     max_tokens=1000,  # Allow sufficient tokens for detailed answers
+#                 )
+#                 answer = completion.choices[0].message.content
+#                 print(f"[CHATBOT] Received answer: {len(answer)} characters")
+#             except Exception as e:
+#                 error_str = str(e)
+#                 if "Invalid API key" in error_str or "incorrect API key" in error_str.lower():
+#                     answer = (
+#                         "⚠️ Invalid OpenAI API key detected. "
+#                         "Please check your .env file and ensure OPENAI_API_KEY is set correctly. "
+#                         "The API key should start with 'sk-' and be a valid OpenAI key. "
+#                         "After updating, restart the server."
+#                     )
+#                 elif "quota" in error_str.lower() or "insufficient_quota" in error_str.lower():
+#                     answer = f"⚠️ OpenAI API quota exceeded. Here's a demo response based on your question: '{req.message}'\n\nBased on the available documents, I can provide information about data structures, Python programming, and related topics. Please check your OpenAI billing to restore full functionality."
+#                 else:
+#                     answer = f"⚠️ Error calling OpenAI API: {error_str}. Please check your API key and network connection."
+#                 print(f"[CHATBOT] Error during API call: {error_str}")
+
+#         # Store the assistant response in session history
+#         assistant_msg = SessionMessage(
+#             role="assistant",
+#             content=answer,
+#             subjectId=user_msg.subjectId,
+#             topicId=user_msg.topicId,
+#             docName=user_msg.docName
+#         )
+#         session_manager.append_history(req.sessionId, assistant_msg)
+
+#         # Track conversation for analytics
+#         response_time = time.time() - start_time
+#         conversation = Conversation(
+#             sessionId=req.sessionId,
+#             userId=req.userId,
+#             mode=req.mode,
+#             subjectId=req.subjectId,
+#             topicId=req.topicId,
+#             docName=req.docName,
+#             userMessage=req.message,
+#             aiResponse=answer,
+#             sources=sources,
+#             responseTime=response_time,
+#             tokenCount=len(answer.split())  # Approximate token count
+#         )
+#         conversation_manager.add_conversation(conversation)
+
+#         return ChatResponse(
+#             answer=answer, 
+#             sources=sources, 
+#             sessionId=req.sessionId, 
+#             userId=req.userId,
+#             mode=req.mode
+#         )
+#     #AVINASH-End
 
     # CLOUD (web / YouTube / GitHub) mode
     if deps.TAVILY_API_KEY:
