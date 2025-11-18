@@ -63,6 +63,7 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
   const [prompt, setPrompt] = useState("");
   const [subjectName, setSubjectName] = useState("");
   const [topicName, setTopicName] = useState("");
+  const [docIds, setDocIds] = useState<string>(""); // Comma-separated docIds for internal mode
   const [generating, setGenerating] = useState(false);
   const [generationResult, setGenerationResult] = useState<GenerateContentResponse | null>(null);
   
@@ -172,8 +173,12 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
 
       // Add mode-specific fields
       if (mode === "internal") {
-        // For internal mode, we could add docIds if available
-        requestBody.docIds = [];
+        // For internal mode, parse docIds from comma-separated string
+        if (docIds.trim()) {
+          requestBody.docIds = docIds.split(',').map(id => id.trim()).filter(id => id.length > 0);
+        } else {
+          requestBody.docIds = [];
+        }
       } else {
         // For external mode
         if (subjectName) requestBody.subjectName = subjectName;
@@ -467,6 +472,31 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                       fontSize: 14,
                     }}
                   />
+                </div>
+              </div>
+            )}
+
+            {mode === "internal" && (
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                  Document IDs (docIds) - Optional
+                </label>
+                <input
+                  type="text"
+                  value={docIds}
+                  onChange={(e) => setDocIds(e.target.value)}
+                  placeholder="Enter comma-separated docIds (e.g., doc-id-1, doc-id-2) or leave empty to use all documents"
+                  style={{
+                    width: "100%",
+                    padding: 8,
+                    border: "1px solid #ccc",
+                    borderRadius: 4,
+                    fontSize: 14,
+                    fontFamily: "monospace",
+                  }}
+                />
+                <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+                  💡 Tip: Get docIds from the Upload page after uploading files. Enter multiple docIds separated by commas to generate content from specific documents only.
                 </div>
               </div>
             )}

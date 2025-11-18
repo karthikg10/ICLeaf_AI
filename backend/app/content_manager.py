@@ -194,13 +194,23 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
             
             for doc_id in doc_ids_set:
                 try:
-                    # Query with doc_name filter (docId should match docName or filename)
-                    doc_hits = rag.query(
-                        request.prompt,
-                        top_k=hits_per_doc,
-                        min_similarity=-0.2,
-                        doc_name=doc_id
-                    )
+                    # First try filtering by docId (UUID) if it looks like a UUID
+                    # Otherwise try by doc_name/filename (legacy support)
+                    if len(doc_id) == 36 and doc_id.count('-') == 4:  # UUID format
+                        doc_hits = rag.query(
+                            request.prompt,
+                            top_k=hits_per_doc,
+                            min_similarity=-0.2,
+                            doc_id=doc_id
+                        )
+                    else:
+                        # Legacy: filter by doc_name or filename
+                        doc_hits = rag.query(
+                            request.prompt,
+                            top_k=hits_per_doc,
+                            min_similarity=-0.2,
+                            doc_name=doc_id
+                        )
                     all_hits.extend(doc_hits)
                 except Exception as e:
                     print(f"[CONTENT] Error querying docId '{doc_id}': {e}")
@@ -219,10 +229,12 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                     filtered_hits = []
                     for hit in all_hits:
                         meta = hit.get("meta", {})
+                        doc_id_in_meta = meta.get("docId", "")
                         doc_name = meta.get("docName", meta.get("filename", ""))
                         filename = meta.get("filename", "")
                         # Check if this hit matches any of the requested docIds
-                        if any(doc_id in doc_name or doc_id in filename or doc_name == doc_id or filename == doc_id 
+                        # Match by docId (UUID), docName, or filename
+                        if any(doc_id == doc_id_in_meta or doc_id in doc_name or doc_id in filename or doc_name == doc_id or filename == doc_id 
                                for doc_id in doc_ids_set):
                             filtered_hits.append(hit)
                     all_hits = filtered_hits[:top_k]

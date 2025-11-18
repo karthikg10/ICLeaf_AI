@@ -700,8 +700,12 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
                     docName=req.docName,
                     uploadedBy=req.uploadedBy,
                     chunks_processed=0,
-                    message="No valid chunks could be created from the content"
+                    message="No valid chunks could be created from the content",
+                    docId=None
                 )
+            
+            # Generate unique document ID for this content
+            doc_id = str(uuid.uuid4())
             
             # Convert chunks to ChromaDB format (list of tuples: (text, metadata))
             chroma_docs = []
@@ -714,7 +718,8 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
                     "docName": req.docName,
                     "uploadedBy": req.uploadedBy,
                     "chunk_index": chunk.get("metadata", {}).get("chunk_index", 0),
-                    "source": "direct_embed"
+                    "source": "direct_embed",
+                    "docId": doc_id  # Add unique document ID
                 }
                 chroma_docs.append((chunk["text"], meta))
             
@@ -722,7 +727,7 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
             if chroma_docs:
                 try:
                     rag.add_documents(chroma_docs)
-                    print(f"[embed] Successfully stored {len(chroma_docs)} chunks from direct content in ChromaDB")
+                    print(f"[embed] Successfully stored {len(chroma_docs)} chunks from direct content in ChromaDB with docId: {doc_id}")
                 except Exception as e:
                     print(f"[embed] Error storing in ChromaDB: {e}")
                     return EmbedResponse(
@@ -732,7 +737,8 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
                         docName=req.docName,
                         uploadedBy=req.uploadedBy,
                         chunks_processed=0,
-                        message=f"Error storing in ChromaDB: {str(e)}"
+                        message=f"Error storing in ChromaDB: {str(e)}",
+                        docId=None
                     )
             
             return EmbedResponse(
@@ -742,7 +748,8 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
                 docName=req.docName,
                 uploadedBy=req.uploadedBy,
                 chunks_processed=len(chroma_docs),
-                message=f"Successfully embedded and stored {len(chroma_docs)} chunks in ChromaDB"
+                message=f"Successfully embedded and stored {len(chroma_docs)} chunks in ChromaDB",
+                docId=doc_id
             )
         else:
             return EmbedResponse(
@@ -752,7 +759,8 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
                 docName=req.docName,
                 uploadedBy=req.uploadedBy,
                 chunks_processed=0,
-                message="Either content or file_path must be provided (and not empty)"
+                message="Either content or file_path must be provided (and not empty)",
+                docId=None
             )
             
     except Exception as e:
@@ -763,7 +771,8 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
             docName=req.docName,
             uploadedBy=req.uploadedBy,
             chunks_processed=0,
-            message=f"Error embedding knowledge: {str(e)}"
+            message=f"Error embedding knowledge: {str(e)}",
+            docId=None
         )
 
 @api_router.post("/chatbot/knowledge/ingest-file")
@@ -850,11 +859,16 @@ async def upload_file(
             print(f"[UPLOAD] Processing result: {result}")
             
             return {
-                "success": True,
-                "message": f"File uploaded and processed: {file.filename}",
+                "success": result.ok if hasattr(result, 'ok') else result.success,
+                "message": result.message if hasattr(result, 'message') else f"File uploaded and processed: {file.filename}",
                 "filePath": file_path,
                 "filename": safe_filename,
-                "contentId": unique_filename
+                "contentId": unique_filename,
+                "docId": result.docId if hasattr(result, 'docId') else None,  # Return the docId from embedding
+                "subjectId": result.subjectId if hasattr(result, 'subjectId') else subjectId,
+                "topicId": result.topicId if hasattr(result, 'topicId') else topicId,
+                "docName": result.docName if hasattr(result, 'docName') else file.filename,
+                "chunks_processed": result.chunks_processed if hasattr(result, 'chunks_processed') else 0
             }
         
         except Exception as e:
@@ -904,6 +918,27 @@ def check_uploads_directory():
         return {
             "ok": False,
             "error": str(e)
+        }
+
+@api_router.get("/chatbot/knowledge/documents")
+def list_all_documents():
+    """List all uploaded documents with their docIds."""
+    try:
+        documents = rag.list_all_documents()
+        return {
+            "ok": True,
+            "count": len(documents),
+            "documents": documents
+        }
+    except Exception as e:
+        print(f"[ERROR] Failed to list documents: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "ok": False,
+            "error": str(e),
+            "count": 0,
+            "documents": []
         }
 
 

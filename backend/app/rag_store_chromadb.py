@@ -108,6 +108,9 @@ class ChromaRAGStore:
                     "uploadedBy": meta.get("uploadedBy", ""),
                     "chunk_index": str(meta.get("chunk_index", i)),
                 }
+                # Add docId to metadata if present
+                if "docId" in meta:
+                    metadata["docId"] = meta["docId"]
                 metadatas.append(metadata)
                 
                 # Generate unique ID
@@ -152,6 +155,7 @@ class ChromaRAGStore:
         subject_id: Optional[str] = None,
         topic_id: Optional[str] = None,
         doc_name: Optional[str] = None,
+        doc_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Query the RAG store using OpenAI embeddings."""
         if not query_text or not query_text.strip():
@@ -175,6 +179,8 @@ class ChromaRAGStore:
                 where["topicId"] = topic_id
             if doc_name:
                 where["docName"] = doc_name
+            if doc_id:
+                where["docId"] = doc_id
             if not where:
                 where = None  # let Chroma ignore it
 
@@ -429,6 +435,55 @@ class ChromaRAGStore:
             logger.error(f"[RAG] Error getting stats: {e}")
             return {}
 
+    def list_all_documents(self) -> List[Dict[str, Any]]:
+        """Get a list of all unique documents with their docIds and metadata."""
+        try:
+            # Get all documents from ChromaDB
+            collection_data = self.collection.get(include=["metadatas"])
+            metadatas = collection_data.get("metadatas", [])
+            
+            # Create a dictionary to store unique documents by docId
+            documents_map: Dict[str, Dict[str, Any]] = {}
+            
+            for meta in metadatas:
+                if not meta:
+                    continue
+                
+                doc_id = meta.get("docId")
+                if not doc_id:
+                    continue  # Skip chunks without docId (older documents)
+                
+                # If we haven't seen this docId yet, create an entry
+                if doc_id not in documents_map:
+                    documents_map[doc_id] = {
+                        "docId": doc_id,
+                        "docName": meta.get("docName", meta.get("filename", "Unknown")),
+                        "filename": meta.get("filename", "Unknown"),
+                        "title": meta.get("title", meta.get("filename", "Document")),
+                        "subjectId": meta.get("subjectId", ""),
+                        "topicId": meta.get("topicId", ""),
+                        "uploadedBy": meta.get("uploadedBy", ""),
+                        "chunkCount": 0  # Will count chunks below
+                    }
+                
+                # Increment chunk count for this document
+                documents_map[doc_id]["chunkCount"] = documents_map[doc_id].get("chunkCount", 0) + 1
+            
+            # Convert to list
+            documents = list(documents_map.values())
+            
+            # Sort by docName for better UX
+            documents.sort(key=lambda x: x.get("docName", "").lower())
+            
+            logger.info(f"[RAG] Listed {len(documents)} unique documents")
+            return documents
+            
+        except Exception as e:
+            logger.error(f"[RAG] Error listing documents: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
 
 # Global instance
 _rag_store: Optional[ChromaRAGStore] = None
@@ -455,10 +510,11 @@ def query(
     subject_id: Optional[str] = None,
     topic_id: Optional[str] = None,
     doc_name: Optional[str] = None,
+    doc_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Query the RAG store."""
     store = get_rag_store()
-    return store.query(query_text, top_k, min_similarity, subject_id, topic_id, doc_name)
+    return store.query(query_text, top_k, min_similarity, subject_id, topic_id, doc_name, doc_id)
 
 
 def count() -> int:
@@ -470,4 +526,9 @@ def count() -> int:
     except Exception as e:
         logger.error(f"[RAG] Error counting documents: {e}")
         return 0
+
+def list_all_documents() -> List[Dict[str, Any]]:
+    """List all unique documents with their docIds."""
+    store = get_rag_store()
+    return store.list_all_documents()
 

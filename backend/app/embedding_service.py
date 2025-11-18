@@ -1,6 +1,7 @@
 # backend/app/embedding_service.py
 import os
 import hashlib
+import uuid
 from typing import List, Dict, Any, Optional, Tuple
 from openai import OpenAI
 from . import deps
@@ -87,7 +88,8 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
                 docName=doc_name,
                 uploadedBy=uploaded_by,
                 chunks_processed=0,
-                message=f"File not found: {file_path}"
+                message=f"File not found: {file_path}",
+                docId=None
             )
         
         # Use ingest_dir logic to read different file types (PDF, DOCX, TXT, etc.)
@@ -101,8 +103,12 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
                 docName=doc_name,
                 uploadedBy=uploaded_by,
                 chunks_processed=0,
-                message="File is empty, unreadable, or unsupported format"
+                message="File is empty, unreadable, or unsupported format",
+                docId=None
             )
+        
+        # Generate unique document ID for this file
+        doc_id = str(uuid.uuid4())
         
         # Prepare documents for ChromaDB with metadata
         chroma_docs: List[Tuple[str, Dict]] = []
@@ -116,6 +122,7 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
             enhanced_meta["filename"] = meta.get("filename", os.path.basename(file_path))
             enhanced_meta["title"] = meta.get("title", enhanced_meta.get("filename", "Document"))
             enhanced_meta["source"] = "upload"
+            enhanced_meta["docId"] = doc_id  # Add unique document ID
             
             chroma_docs.append((chunk_text, enhanced_meta))
         
@@ -123,7 +130,7 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
         if chroma_docs:
             try:
                 rag.add_documents(chroma_docs)
-                print(f"[embed] Successfully stored {len(chroma_docs)} chunks from {doc_name} in ChromaDB")
+                print(f"[embed] Successfully stored {len(chroma_docs)} chunks from {doc_name} in ChromaDB with docId: {doc_id}")
             except Exception as e:
                 print(f"[embed] Error storing in ChromaDB: {e}")
                 return EmbedResponse(
@@ -133,7 +140,8 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
                     docName=doc_name,
                     uploadedBy=uploaded_by,
                     chunks_processed=0,
-                    message=f"Error storing in ChromaDB: {str(e)}"
+                    message=f"Error storing in ChromaDB: {str(e)}",
+                    docId=None
                 )
         
         return EmbedResponse(
@@ -143,7 +151,8 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
             docName=doc_name,
             uploadedBy=uploaded_by,
             chunks_processed=len(chroma_docs),
-            message=f"Successfully processed and stored {len(chroma_docs)} chunks from {doc_name} in ChromaDB"
+            message=f"Successfully processed and stored {len(chroma_docs)} chunks from {doc_name} in ChromaDB",
+            docId=doc_id
         )
         
     except Exception as e:
@@ -154,7 +163,8 @@ def embed_single_file(file_path: str, subject_id: str, topic_id: str, doc_name: 
             docName=doc_name,
             uploadedBy=uploaded_by,
             chunks_processed=0,
-            message=f"Error processing file: {str(e)}"
+            message=f"Error processing file: {str(e)}",
+            docId=None
         )
 
 def embed_directory(dir_path: str, subject_id: str, topic_id: str, uploaded_by: str, recursive: bool = True) -> Dict[str, Any]:

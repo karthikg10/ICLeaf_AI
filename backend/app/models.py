@@ -133,6 +133,7 @@ class EmbedResponse(BaseModel):
     chunks_processed: int
     embedding_model: str = "text-embedding-3-small"
     message: str
+    docId: Optional[str] = None  # Unique document ID for filtering in content generation
     
     model_config = {"populate_by_name": True}
 

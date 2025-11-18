@@ -1,7 +1,8 @@
 import { useState } from "react";
 
 type EmbedResponse = {
-  ok: boolean;
+  ok?: boolean;
+  success?: boolean;
   subjectId: string;
   topicId: string;
   docName: string;
@@ -9,6 +10,10 @@ type EmbedResponse = {
   chunks_processed: number;
   embedding_model?: string;
   message: string;
+  docId?: string | null;  // Unique document ID for filtering in content generation
+  filePath?: string;
+  filename?: string;
+  contentId?: string;
 };
 
 interface UploadPageProps {
@@ -26,6 +31,11 @@ export default function UploadPage({ apiUrl }: UploadPageProps) {
   const [recursive, setRecursive] = useState(true);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<EmbedResponse | null>(null);
+  
+  // Document list state
+  const [showDocumentList, setShowDocumentList] = useState(false);
+  const [documents, setDocuments] = useState<any[]>([]);
+  const [loadingDocuments, setLoadingDocuments] = useState(false);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
@@ -111,6 +121,32 @@ export default function UploadPage({ apiUrl }: UploadPageProps) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const fetchAllDocuments = async () => {
+    setLoadingDocuments(true);
+    try {
+      const response = await fetch(`${apiUrl}/api/chatbot/knowledge/documents`);
+      const data = await response.json();
+      if (data.ok) {
+        setDocuments(data.documents || []);
+        setShowDocumentList(true);
+      } else {
+        alert(`Error: ${data.error || 'Failed to fetch documents'}`);
+      }
+    } catch (error: any) {
+      alert(`Error: ${error.message}`);
+    } finally {
+      setLoadingDocuments(false);
+    }
+  };
+
+  const copyDocId = (docId: string) => {
+    navigator.clipboard.writeText(docId).then(() => {
+      alert('docId copied to clipboard!');
+    }).catch(() => {
+      alert('Failed to copy. Please manually copy the docId.');
+    });
   };
 
   return (
@@ -395,17 +431,28 @@ export default function UploadPage({ apiUrl }: UploadPageProps) {
             fontWeight: 600,
             color: result.ok ? "#0a7a3d" : "#721c24"
           }}>
-            {result.ok ? "✅ Upload Successful" : "❌ Upload Failed"}
+            {(result.ok || result.success) ? "✅ Upload Successful" : "❌ Upload Failed"}
           </h3>
           
           <div style={{ fontSize: 14, lineHeight: 1.5 }}>
             <div><strong>Message:</strong> {result.message}</div>
-            {result.ok && (
+            {(result.ok || result.success) && (
               <>
                 <div><strong>Chunks Processed:</strong> {result.chunks_processed}</div>
                 <div><strong>Subject ID:</strong> {result.subjectId}</div>
                 <div><strong>Topic ID:</strong> {result.topicId}</div>
                 {result.docName && <div><strong>Document:</strong> {result.docName}</div>}
+                {result.docId && (
+                  <div style={{ marginTop: 8, padding: 8, background: "#fff", borderRadius: 4, border: "1px solid #28a745" }}>
+                    <strong style={{ color: "#28a745" }}>📄 Document ID (docId):</strong>
+                    <div style={{ fontFamily: "monospace", fontSize: 12, marginTop: 4, wordBreak: "break-all" }}>
+                      {result.docId}
+                    </div>
+                    <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>
+                      Use this docId in content generation requests to filter by this document
+                    </div>
+                  </div>
+                )}
                 {result.embedding_model && (
                   <div><strong>Model:</strong> {result.embedding_model}</div>
                 )}
@@ -414,6 +461,122 @@ export default function UploadPage({ apiUrl }: UploadPageProps) {
           </div>
         </div>
       )}
+
+      {/* View All Documents Section */}
+      <div style={{
+        background: "#fff",
+        padding: 20,
+        borderRadius: 8,
+        border: "1px solid #e9ecef",
+        marginBottom: 24,
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
+            📚 All Uploaded Documents
+          </h3>
+          <button
+            onClick={fetchAllDocuments}
+            disabled={loadingDocuments}
+            style={{
+              padding: "8px 16px",
+              background: loadingDocuments ? "#ccc" : "#007bff",
+              color: "white",
+              border: "none",
+              borderRadius: 6,
+              cursor: loadingDocuments ? "not-allowed" : "pointer",
+              fontSize: 14,
+              fontWeight: 600,
+            }}
+          >
+            {loadingDocuments ? "Loading..." : showDocumentList ? "Refresh List" : "View All Documents"}
+          </button>
+        </div>
+
+        {showDocumentList && (
+          <div>
+            {documents.length === 0 ? (
+              <div style={{ padding: 20, textAlign: "center", color: "#666" }}>
+                No documents found. Upload a file to get started!
+              </div>
+            ) : (
+              <div style={{ 
+                background: "#f8f9fa", 
+                borderRadius: 6, 
+                padding: 12,
+                maxHeight: 500,
+                overflowY: "auto"
+              }}>
+                <div style={{ fontSize: 14, color: "#666", marginBottom: 12 }}>
+                  Found {documents.length} document(s). Click on a docId to copy it.
+                </div>
+                <div style={{ display: "grid", gap: 12 }}>
+                  {documents.map((doc, index) => (
+                    <div
+                      key={index}
+                      style={{
+                        background: "#fff",
+                        padding: 16,
+                        borderRadius: 6,
+                        border: "1px solid #dee2e6",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 8 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>
+                            {doc.docName || doc.filename || doc.title || "Unknown Document"}
+                          </div>
+                          {doc.title && doc.title !== doc.docName && (
+                            <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>
+                              {doc.title}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => copyDocId(doc.docId)}
+                          style={{
+                            padding: "4px 8px",
+                            background: "#28a745",
+                            color: "white",
+                            border: "none",
+                            borderRadius: 4,
+                            cursor: "pointer",
+                            fontSize: 11,
+                            fontWeight: 600,
+                          }}
+                          title="Click to copy docId"
+                        >
+                          Copy docId
+                        </button>
+                      </div>
+                      
+                      <div style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>
+                        <div style={{ fontFamily: "monospace", fontSize: 11, background: "#f8f9fa", padding: 8, borderRadius: 4, wordBreak: "break-all" }}>
+                          <strong>docId:</strong> {doc.docId}
+                        </div>
+                      </div>
+                      
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, fontSize: 11, color: "#666" }}>
+                        {doc.subjectId && (
+                          <div><strong>Subject ID:</strong> {doc.subjectId}</div>
+                        )}
+                        {doc.topicId && (
+                          <div><strong>Topic ID:</strong> {doc.topicId}</div>
+                        )}
+                        {doc.uploadedBy && (
+                          <div><strong>Uploaded By:</strong> {doc.uploadedBy}</div>
+                        )}
+                        {doc.chunkCount !== undefined && (
+                          <div><strong>Chunks:</strong> {doc.chunkCount}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Help Section */}
       <div style={{
