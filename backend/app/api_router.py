@@ -675,7 +675,17 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
     Supports both direct content and file paths.
     """
     try:
-        if req.content:
+        # Check if file_path is provided and not empty - prioritize file_path over content
+        if req.file_path and isinstance(req.file_path, str) and req.file_path.strip():
+            # Process file
+            return embedding_service.embed_single_file(
+                req.file_path,
+                req.subjectId,
+                req.topicId,
+                req.docName,
+                req.uploadedBy
+            )
+        elif req.content and isinstance(req.content, str) and req.content.strip():
             # Process direct text content
             chunks = embedding_service.process_document_content(
                 req.content, 
@@ -734,16 +744,6 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
                 chunks_processed=len(chroma_docs),
                 message=f"Successfully embedded and stored {len(chroma_docs)} chunks in ChromaDB"
             )
-            
-        elif req.file_path:
-            # Process file
-            return embedding_service.embed_single_file(
-                req.file_path,
-                req.subjectId,
-                req.topicId,
-                req.docName,
-                req.uploadedBy
-            )
         else:
             return EmbedResponse(
                 success=False,
@@ -752,7 +752,7 @@ def embed_knowledge(req: EmbedRequest = Body(...)):
                 docName=req.docName,
                 uploadedBy=req.uploadedBy,
                 chunks_processed=0,
-                message="Either content or file_path must be provided"
+                message="Either content or file_path must be provided (and not empty)"
             )
             
     except Exception as e:
