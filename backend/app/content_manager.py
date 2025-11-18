@@ -167,7 +167,11 @@ def clean_markdown_formatting(text: str) -> str:
     return text
 
 def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: int = 5) -> str:
-    """Get RAG context from uploaded documents for internal mode content generation."""
+    """Get RAG context from uploaded documents for internal mode content generation.
+    
+    If docIds are provided, filters results to only include chunks from those documents.
+    docIds should be document names/filenames that match the docName or filename in metadata.
+    """
     if request.mode != "internal":
         return ""
     
@@ -175,18 +179,70 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
         # Query RAG store with the prompt
         # Use -0.2 as min_similarity to be more permissive (same as /api/internal/search)
         # This ensures we get results even when similarity scores are low
-        hits = rag.query(
-            request.prompt,
-            top_k=top_k,
-            min_similarity=-0.2
-        )
         
-        if not hits:
+        # If docIds are provided, we need to query for each docId separately
+        # because rag.query() only supports filtering by a single doc_name
+        all_hits = []
+        
+        if request.docIds and len(request.docIds) > 0:
+            # Filter by specific documents
+            doc_ids_set = set(doc_id.strip() for doc_id in request.docIds if doc_id and doc_id.strip())
+            print(f"[CONTENT] Internal mode: Filtering by docIds: {list(doc_ids_set)}")
+            
+            # Query each document separately and combine results
+            hits_per_doc = max(1, top_k // len(doc_ids_set))  # Distribute top_k across documents
+            
+            for doc_id in doc_ids_set:
+                try:
+                    # Query with doc_name filter (docId should match docName or filename)
+                    doc_hits = rag.query(
+                        request.prompt,
+                        top_k=hits_per_doc,
+                        min_similarity=-0.2,
+                        doc_name=doc_id
+                    )
+                    all_hits.extend(doc_hits)
+                except Exception as e:
+                    print(f"[CONTENT] Error querying docId '{doc_id}': {e}")
+                    continue
+            
+            # If no results from filtered query, try without filter as fallback
+            if not all_hits:
+                print(f"[CONTENT] No results with docIds filter, trying without filter as fallback")
+                all_hits = rag.query(
+                    request.prompt,
+                    top_k=top_k,
+                    min_similarity=-0.2
+                )
+                # Then manually filter by docIds
+                if all_hits:
+                    filtered_hits = []
+                    for hit in all_hits:
+                        meta = hit.get("meta", {})
+                        doc_name = meta.get("docName", meta.get("filename", ""))
+                        filename = meta.get("filename", "")
+                        # Check if this hit matches any of the requested docIds
+                        if any(doc_id in doc_name or doc_id in filename or doc_name == doc_id or filename == doc_id 
+                               for doc_id in doc_ids_set):
+                            filtered_hits.append(hit)
+                    all_hits = filtered_hits[:top_k]
+        else:
+            # No docIds specified, query all documents
+            all_hits = rag.query(
+                request.prompt,
+                top_k=top_k,
+                min_similarity=-0.2
+            )
+        
+        if not all_hits:
+            print(f"[CONTENT] Internal mode: No context retrieved from RAG query")
             return ""
         
         # Clean and extract context from hits
         context_blocks = []
-        for h in hits:
+        seen_texts = set()  # Deduplicate context blocks
+        
+        for h in all_hits:
             text_content = h.get("text", "")
             if not text_content or not isinstance(text_content, str):
                 continue
@@ -200,7 +256,18 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
             
             # Remove excessive whitespace
             text_content = " ".join(text_content.split())
+            
+            # Deduplicate: skip if we've seen this exact text before
+            text_hash = hash(text_content[:200])  # Hash first 200 chars for deduplication
+            if text_hash in seen_texts:
+                continue
+            seen_texts.add(text_hash)
+            
             context_blocks.append(text_content)
+            
+            # Limit to top_k blocks
+            if len(context_blocks) >= top_k:
+                break
         
         if not context_blocks:
             return ""
@@ -211,7 +278,8 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
             ctx_parts.append(f"[Content Block {i}]\n{block}")
         
         context = "\n\n---\n\n".join(ctx_parts)
-        print(f"[CONTENT] Internal mode: Retrieved {len(context_blocks)} context blocks from uploaded documents")
+        doc_info = f" from {len(request.docIds)} specified documents" if request.docIds else ""
+        print(f"[CONTENT] Internal mode: Retrieved {len(context_blocks)} context blocks{doc_info} from uploaded documents")
         return context
         
     except Exception as e:
