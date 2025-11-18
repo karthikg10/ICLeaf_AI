@@ -279,16 +279,32 @@ class ContentConfig(BaseModel):
     pdf: Optional[PDFConfig] = None
     ppt: Optional[PPTConfig] = None
 
+
 class GenerateContentRequest(BaseModel):
     userId: str
-    role: Role = "Learner"
-    mode: Mode = "internal"
-    contentType: ContentType
+    role: str = "student"
+    mode: str = "internal"
+    contentType: str
     prompt: str
-    docIds: Optional[List[str]] = None  # For internal mode
-    subjectName: Optional[str] = None  # For external mode
-    topicName: Optional[str] = None  # For external mode
-    contentConfig: dict
+    contentConfig: dict = {}
+    docIds: List[str] = []
+    subjectName: Optional[str] = None
+    topicName: Optional[str] = None
+    
+    # NEW FIELDS:
+    customFileName: Optional[str] = None  # User-specified filename (without extension)
+    customFilePath: Optional[str] = None  # User-specified directory path
+
+# class GenerateContentRequest(BaseModel):
+#     userId: str
+#     role: Role = "Learner"
+#     mode: Mode = "internal"
+#     contentType: ContentType
+#     prompt: str
+#     docIds: Optional[List[str]] = None  # For internal mode
+#     subjectName: Optional[str] = None  # For external mode
+#     topicName: Optional[str] = None  # For external mode
+#     contentConfig: dict
 
 class GeneratedContent(BaseModel):
     contentId: str
@@ -313,6 +329,10 @@ class GenerateContentResponse(BaseModel):
     status: ContentStatus
     message: str
     estimated_completion_time: Optional[int] = Field(default=None, alias="etaSeconds")  # seconds
+    filePath: Optional[str] = None  # Actual storage file path
+    fileName: Optional[str] = None  # Actual filename
+    storageDirectory: Optional[str] = None  # Storage directory path
+    metadata: Optional[dict] = None  # Additional metadata including actualFileName, actualFilePath, etc.
     
     model_config = {"populate_by_name": True}
 
