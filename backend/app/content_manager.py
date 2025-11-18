@@ -5,7 +5,7 @@ import json
 import asyncio
 import shutil
 import requests
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union, Any
 from datetime import datetime
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
@@ -338,7 +338,7 @@ Generate the quiz in the exact table format specified above."""
     
     return extract_openai_response(response)
 
-async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfig) -> List[Dict[str, str]]:
+async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfig) -> List[Dict[str, Union[str, int]]]:
     """Generate quiz rows suitable for CSV/XLSX export with answer description."""
     if not content_client:
         raise Exception("OpenAI client not configured")
@@ -381,13 +381,30 @@ async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfi
     except Exception:
         data = []
 
-    rows: List[Dict[str, str]] = []
+    rows: List[Dict[str, Union[str, int]]] = []
     for row in data:
-        norm = {k: str(row.get(k, "")) for k in keys}
+        norm: Dict[str, Union[str, int]] = {}
+        for k in keys:
+            value = row.get(k, "")
+            if k == "s_no":
+                # Keep as integer
+                try:
+                    norm[k] = int(value) if value else 0
+                except (ValueError, TypeError):
+                    norm[k] = 0
+            elif k == "correct_answer":
+                # Keep as integer
+                try:
+                    norm[k] = int(value) if value else 0
+                except (ValueError, TypeError):
+                    norm[k] = 0
+            else:
+                # Convert to string
+                norm[k] = str(value) if value else ""
         rows.append(norm)
     return rows
 
-def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, str]]) -> Tuple[str, str]:
+def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]]]) -> Tuple[str, str]:
     """Write quiz rows to CSV/XLSX with the specified headers order including ANSWER DESC."""
     headers = [
         "S.No.", "QUESTION", "CORRECT ANSWER", "ANSWER DESC",
@@ -412,7 +429,19 @@ def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, str]]) -> Tuple
         writer = csv.writer(f)
         writer.writerow(headers)
         for r in rows:
-            writer.writerow([r.get(key_map[h], "") for h in headers])
+            row_data = []
+            for h in headers:
+                key = key_map[h]
+                value = r.get(key, "")
+                # Convert S.No. and CORRECT ANSWER to integers for CSV
+                if h == "S.No." or h == "CORRECT ANSWER":
+                    try:
+                        row_data.append(int(value) if value else 0)
+                    except (ValueError, TypeError):
+                        row_data.append(0)
+                else:
+                    row_data.append(str(value) if value else "")
+            writer.writerow(row_data)
 
     # XLSX
     workbook = xlsxwriter.Workbook(xlsx_path)
@@ -422,7 +451,17 @@ def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, str]]) -> Tuple
         ws.write(0, col, h, header_fmt)
     for row_idx, r in enumerate(rows, start=1):
         for col, h in enumerate(headers):
-            ws.write(row_idx, col, r.get(key_map[h], ""))
+            key = key_map[h]
+            value = r.get(key, "")
+            # Use write_number for S.No. (column 0) and CORRECT ANSWER (column 2)
+            if h == "S.No." or h == "CORRECT ANSWER":
+                try:
+                    num_value = int(value) if value else 0
+                    ws.write_number(row_idx, col, num_value)
+                except (ValueError, TypeError):
+                    ws.write_number(row_idx, col, 0)
+            else:
+                ws.write(row_idx, col, str(value) if value else "")
     ws.set_row(0, 18)
     ws.set_column(0, len(headers)-1, 22)
     workbook.close()
@@ -462,37 +501,37 @@ Make it comprehensive and aligned with learning objectives."""
     return extract_openai_response(response)
 
 async def generate_assessment_table(request: GenerateContentRequest, config: AssessmentConfig) -> List[Dict[str, str]]:
-    """Generate assessment in a structured row schema suitable for XLSX/CSV with auto-populated subject and topic."""
+    """Generate assessment in exact template format."""
     if not content_client:
         raise Exception("OpenAI client not configured")
-
     columns = [
-        "subject","topic","type","question","answer_description","levels","total_options",
-        "choice_answer_one","choice_answer_two","choice_answer_three","choice_answer_four","choice_answer_five",
-        "correct_answers","tag1","tag2","tag3"
+        "question", "type", "answer_description", "levels", "total_options",
+        "choice_answer_one", "choice_answer_two", "choice_answer_three", 
+        "choice_answer_four", "choice_answer_five", "correct_answers", "tag1", "tag2"
     ]
-
     system_prompt = (
-        "You create assessment rows for export to CSV/XLSX. "
-        "Return ONLY valid JSON array (no markdown) of objects with EXACTLY these keys: "
-        + ",".join(columns) + ". "
-        "The 'type' is one of: Choice, FillUp, Match. "
-        "'levels' is one of: Easy, Medium, Difficult. "
-        "'total_options' is 3-5 for Choice, 1 for FillUp/Match. "
-        "For 'correct_answers', provide comma-separated indices like '1' or '1,3'. "
-        "When type is FillUp, put the correct answer in choice_answer_one and set total_options to 1. "
-        "When type is Match, put pairs in choice_answer_one..five like 'a=apple'. "
+        "You generate assessment rows for CSV/XLSX export. "
+        "Return ONLY valid JSON array (no markdown) with EXACTLY these keys: " + ",".join(columns) + ". "
+        
+        "RULES:\n"
+        "1. 'question': Question text (can include #{IMG}, #{VID}, #{FILL})\n"
+        "2. 'type': 'Choice', 'FillUp', or 'Match'\n"
+        "3. 'answer_description': Brief explanation\n"
+        "4. 'levels': 'Easy', 'Medium', or 'Difficult'\n"
+        "5. 'total_options': Number of options\n"
+        "6. 'choice_answer_one' to 'choice_answer_five': The answer options\n"
+        "7. 'correct_answers': '1' or '1,2' for Choice; 'a=1,b=2,c=3' for Match\n"
+        "8. 'tag1', 'tag2': Tags\n\n"
+        
+        f"Create exactly 4 rows. Difficulty: {config.difficulty}."
     )
-
     user_prompt = (
         f"Create 4 assessment rows for: {request.prompt}\n"
         f"Subject: {request.subjectName or ''}\n"
         f"Topic: {request.topicName or ''}\n"
-        f"Duration: {config.duration_minutes} minutes. Difficulty: {config.difficulty}. "
-        f"Question types: {', '.join(config.question_types)}. "
-        "Use concise wording for questions and answers."
+        f"Duration: {config.duration_minutes} minutes\n"
+        f"Difficulty: {config.difficulty}\n"
     )
-
     response = content_client.chat.completions.create(
         model=deps.OPENAI_MODEL,
         messages=[
@@ -501,67 +540,141 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
         ],
         temperature=0.4,
     )
-
     txt = extract_openai_response(response).strip()
     try:
         data = json.loads(txt)
         if not isinstance(data, list):
             raise ValueError("expected list")
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] Failed to parse assessment JSON: {e}")
         data = []
     
-    # Normalize rows to include all columns
-    # IMPORTANT: Populate subject and topic from request
     norm_rows: List[Dict[str, str]] = []
     for row in data:
-        norm = {k: str(row.get(k, "")) for k in columns}
-        
-        # OVERRIDE subject and topic with actual values from request
-        if request.subjectName:
-            norm["subject"] = request.subjectName
-        if request.topicName:
-            norm["topic"] = request.topicName
-        
+        norm = {}
+        for col in columns:
+            value = row.get(col, "")
+            norm[col] = str(value) if value else ""
         norm_rows.append(norm)
     
     return norm_rows
 
-def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]]) -> Tuple[str, str]:
-    """Write assessment rows to CSV and XLSX. Returns (csv_path, xlsx_path)."""
-    headers = [
-        "subject","topic","type","question","answer description","levels","total options",
-        "Choice Answer One","Choice Answer Two","Choice Answer Three","Choice Answer Four","Choice Answer Five",
-        "correct answers","TAG1","TAG2","TAG3"
-    ]
-    key_map = {
-        "subject":"subject","topic":"topic","type":"type","question":"question",
-        "answer description":"answer_description","levels":"levels","total options":"total_options",
-        "Choice Answer One":"choice_answer_one","Choice Answer Two":"choice_answer_two",
-        "Choice Answer Three":"choice_answer_three","Choice Answer Four":"choice_answer_four",
-        "Choice Answer Five":"choice_answer_five","correct answers":"correct_answers",
-        "TAG1":"tag1","TAG2":"tag2","TAG3":"tag3",
-    }
+def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], subject_name: str = "", topic_name: str = "") -> Tuple[str, str]:
+    """Write assessment rows in exact template format."""
+    
     csv_path = os.path.join(storage_path, "assessment.csv")
     xlsx_path = os.path.join(storage_path, "assessment.xlsx")
 
-    # CSV
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(headers)
+        
+        # Row 1: Subject header only
+        row1 = [subject_name] + [''] * 12
+        writer.writerow(row1)
+        
+        # Row 2: Column labels
+        row2 = [
+            topic_name,
+            "type",
+            "answer description", 
+            "levels",
+            "total options",
+            '', '', '', '', '', '', '', ''
+        ]
+        writer.writerow(row2)
+        
+        # Rows 3+: Data
         for r in rows:
-            writer.writerow([r.get(key_map[h], "") for h in headers])
+            data_row = [
+                r.get("question", ""),
+                r.get("type", ""),
+                r.get("answer_description", ""),
+                r.get("levels", ""),
+                r.get("total_options", ""),
+                r.get("choice_answer_one", ""),
+                r.get("choice_answer_two", ""),
+                r.get("choice_answer_three", ""),
+                r.get("choice_answer_four", ""),
+                r.get("choice_answer_five", ""),
+                r.get("correct_answers", ""),
+                r.get("tag1", ""),      # ← FIX: Use tag1 from data, NOT subject_name
+                r.get("tag2", ""),      # ← FIX: Use tag2 from data, NOT topic_name
+            ]
+            writer.writerow(data_row)
 
-    # XLSX
+    # XLSX Format: Same as CSV
     workbook = xlsxwriter.Workbook(xlsx_path)
-    ws = workbook.add_worksheet("Assessment")
-    header_fmt = workbook.add_format({"bold": True})
-    for col, h in enumerate(headers):
-        ws.write(0, col, h, header_fmt)
-    for row_idx, r in enumerate(rows, start=1):
-        for col, h in enumerate(headers):
-            ws.write(row_idx, col, r.get(key_map[h], ""))
+    ws = workbook.add_worksheet("Sheet1")
+    
+    # Formats
+    subject_fmt = workbook.add_format({
+        "bold": True,
+        "font_size": 12,
+        "bg_color": "#FFFFFF"
+    })
+    
+    label_fmt = workbook.add_format({
+        "bold": True,
+        "bg_color": "#E7E6E6",
+        "border": 1,
+        "align": "center",
+        "valign": "vcenter"
+    })
+    
+    data_fmt = workbook.add_format({
+        "border": 1,
+        "align": "left",
+        "valign": "top",
+        "text_wrap": True
+    })
+    
+    # Row 1: Subject header
+    ws.write(0, 0, subject_name, subject_fmt)
+    for col in range(1, 13):
+        ws.write(0, col, '', subject_fmt)
+    
+    # Row 2: Column labels
+    ws.write(1, 0, topic_name, label_fmt)
+    labels = ["type", "answer description", "levels", "total options"] + [''] * 8
+    for col, label in enumerate(labels, start=1):
+        ws.write(1, col, label, label_fmt)
+    
+    # Rows 3+: Data
+    for row_idx, r in enumerate(rows, start=2):
+        data_row = [
+            r.get("question", ""),
+            r.get("type", ""),
+            r.get("answer_description", ""),
+            r.get("levels", ""),
+            r.get("total_options", ""),
+            r.get("choice_answer_one", ""),
+            r.get("choice_answer_two", ""),
+            r.get("choice_answer_three", ""),
+            r.get("choice_answer_four", ""),
+            r.get("choice_answer_five", ""),
+            r.get("correct_answers", ""),
+            r.get("tag1", ""),        # ← FIX: Use tag1 from data
+            r.get("tag2", ""),        # ← FIX: Use tag2 from data
+        ]
+        for col, value in enumerate(data_row):
+            ws.write(row_idx, col, value, data_fmt)
+    
+    # Set column widths
+    ws.set_column(0, 0, 20)
+    ws.set_column(1, 1, 12)
+    ws.set_column(2, 2, 20)
+    ws.set_column(3, 3, 10)
+    ws.set_column(4, 4, 12)
+    ws.set_column(5, 9, 15)
+    ws.set_column(10, 10, 12)
+    ws.set_column(11, 12, 15)
+    
+    # Set row heights
     ws.set_row(0, 18)
-    ws.set_column(0, len(headers)-1, 18)
+    ws.set_row(1, 20)
+    for i in range(2, len(rows) + 2):
+        ws.set_row(i, 35)
+    
     workbook.close()
 
     return csv_path, xlsx_path
@@ -614,23 +727,34 @@ Make it engaging and visually appealing for video viewing."""
         return script_path
 
 async def generate_audio_content(request: GenerateContentRequest, config: AudioConfig, content_id: str, storage_path: str) -> str:
-    """Generate audio script file."""
+    """Generate audio script file and MP3 audio file."""
     if not content_client:
         raise Exception("OpenAI client not configured")
     
     # Generate the script content
-    system_prompt = f"""You are an audio content generator. Create engaging audio content with the following specifications:
-- Duration: {config.duration_seconds} seconds
-- Quality: {config.quality}
-- Format: {config.format}
-- User role: {request.role}
-- Make it engaging and suitable for audio consumption"""
+    # IMPORTANT: We need ONLY the spoken script text, no meta-commentary or disclaimers
+    system_prompt = f"""You are a professional script writer for audio content. Your task is to write ONLY the spoken script text that will be converted to speech using text-to-speech technology.
+
+CRITICAL RULES:
+- Write ONLY the actual spoken words that will be read aloud
+- NO meta-commentary, NO disclaimers, NO instructions about audio creation
+- NO phrases like "I'm unable to create audio files" or "here's a script"
+- Write as if you are the narrator/speaker directly addressing the audience
+- The text you write will be directly converted to speech - write it naturally
+- Duration target: approximately {config.duration_seconds} seconds when spoken
+- Target audience: {request.role}
+- Make it engaging, conversational, and suitable for audio listening"""
     
-    user_prompt = f"""Create audio content based on: {request.prompt}
-Duration: {config.duration_seconds} seconds
-Quality: {config.quality}
-Format: {config.format}
-Make it engaging and conversational for audio listening."""
+    user_prompt = f"""Write the spoken script for an audio recording about: {request.prompt}
+
+Requirements:
+- Write ONLY the spoken words (no meta-commentary)
+- Target duration: {config.duration_seconds} seconds when spoken
+- Write naturally as if speaking directly to the listener
+- Be engaging and conversational
+- Start immediately with the content (no introductions about scripts or audio files)
+
+Begin the script now:"""
     
     response = content_client.chat.completions.create(
         model=deps.OPENAI_MODEL,
@@ -642,18 +766,100 @@ Make it engaging and conversational for audio listening."""
     )
     
     script_content = extract_openai_response(response)
+    original_script = script_content  # Keep original for fallback
+    
+    # Clean up the script content - remove common meta-commentary patterns
+    # Remove disclaimers and meta-text that shouldn't be spoken
+    unwanted_patterns = [
+        "I'm unable to create audio files",
+        "I can provide you with a script",
+        "here's a script",
+        "here is a script",
+        "script that you can use",
+        "[Upbeat background music begins]",
+        "[Background music",
+        "**Narrator:**",
+        "**Narrator**",
+    ]
+    
+    # Remove lines that contain unwanted patterns
+    lines = script_content.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        line_lower = line.lower().strip()
+        # Skip lines that are just separators or contain unwanted patterns
+        if any(pattern.lower() in line_lower for pattern in unwanted_patterns):
+            continue
+        # Skip markdown-style separators (---)
+        if line.strip() == '---' or (line.strip().startswith('---') and len(line.strip()) <= 5):
+            continue
+        # Keep the line if it's actual content
+        if line.strip():
+            cleaned_lines.append(line)
+    
+    script_content = '\n'.join(cleaned_lines).strip()
+    
+    # If the script is empty after cleaning, use the original with minimal cleaning (fallback)
+    if not script_content or len(script_content) < 50:
+        print("[Audio] Warning: Script content was mostly meta-commentary, using original with minimal cleaning")
+        # Try a gentler cleanup - just remove obvious markdown formatting
+        script_content = original_script.replace('**', '').replace('---', '').strip()
     
     # Save script file
     try:
         script_path = os.path.join(storage_path, "audio_script.txt")
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(script_content)
-        return script_path
-            
     except Exception as e:
         script_path = os.path.join(storage_path, "audio_script.txt")
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(f"Error generating audio: {str(e)}\n\nScript: {script_content}")
+    
+    # Generate MP3 file using TTS
+    try:
+        # Map voice_type to OpenAI TTS voices
+        # Female voices: alloy, nova, shimmer
+        # Male voices: echo, fable, onyx
+        voice_map = {
+            "female": "nova",  # Default female voice
+            "male": "onyx"     # Default male voice
+        }
+        voice = voice_map.get(config.voice_type, "alloy")
+        
+        # Map quality to TTS model
+        # high -> tts-1-hd, medium/low -> tts-1
+        model_map = {
+            "high": "tts-1-hd",
+            "medium": "tts-1",
+            "low": "tts-1"
+        }
+        tts_model = model_map.get(config.quality.lower(), "tts-1")
+        
+        # Determine output format
+        audio_format = config.format.lower() if config.format else "mp3"
+        
+        # Generate MP3 file path
+        audio_path = os.path.join(storage_path, f"audio.{audio_format}")
+        
+        # Generate the audio file using TTS
+        success = await media_generator.generate_audio_file(
+            text=script_content,
+            output_path=audio_path,
+            voice=voice,
+            model=tts_model,
+            format=audio_format
+        )
+        
+        if success:
+            print(f"[Audio] Successfully generated MP3 file: {audio_path}")
+            return audio_path
+        else:
+            print(f"[Audio] Failed to generate MP3, returning script path instead")
+            return script_path
+            
+    except Exception as e:
+        print(f"[Audio] Error generating MP3 file: {e}")
+        # Return script path as fallback
         return script_path
 
 async def generate_compiler_content(request: GenerateContentRequest, config: CompilerConfig) -> str:
@@ -1337,7 +1543,15 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             assessment_config_dict = request.contentConfig.get('assessment')
             assessment_config = AssessmentConfig(**assessment_config_dict)
             rows = await generate_assessment_table(request, assessment_config)
-            csv_path, xlsx_path = _write_assessment_csv_xlsx(storage_path, rows)
+            
+            # Pass subject and topic names
+            csv_path, xlsx_path = _write_assessment_csv_xlsx(
+                storage_path, 
+                rows,
+                subject_name=request.subjectName or "Subject",
+                topic_name=request.topicName or "Topic"
+            )
+            
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "video" and request.contentConfig.get('video'):

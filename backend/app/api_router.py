@@ -1651,18 +1651,48 @@ def download_content(contentId: str, request: Request):
         
         # For media files (audio/video), return the actual file
         if content.contentType in ["audio", "video"]:
-            # Determine the correct media file path
-            storage_dir = os.path.dirname(content.filePath)
+            # Use the file path from content (which should be the actual media file)
+            # If it's an audio file, check if it's the MP3/audio file or script file
             if content.contentType == "audio":
-                media_file = os.path.join(storage_dir, "audio.mp3")
+                # Check if the filePath is already the audio file (ends with .mp3, .wav, .ogg, etc.)
+                audio_extensions = ['.mp3', '.wav', '.ogg', '.aac', '.flac']
+                if any(content.filePath.lower().endswith(ext) for ext in audio_extensions):
+                    media_file = content.filePath
+                else:
+                    # Fallback: try to find audio file in the same directory
+                    storage_dir = os.path.dirname(content.filePath)
+                    # Try different audio formats
+                    for ext in audio_extensions:
+                        potential_file = os.path.join(storage_dir, f"audio{ext}")
+                        if os.path.exists(potential_file):
+                            media_file = potential_file
+                            break
+                    else:
+                        # If no audio file found, use the filePath (might be script file)
+                        media_file = content.filePath
             else:  # video
-                media_file = os.path.join(storage_dir, "video.mp4")
+                # For video, try to find video file
+                storage_dir = os.path.dirname(content.filePath)
+                video_file = os.path.join(storage_dir, "video.mp4")
+                media_file = video_file if os.path.exists(video_file) else content.filePath
+            
+            # Determine media type based on file extension
+            file_ext = os.path.splitext(media_file)[1].lower()
+            media_type_map = {
+                '.mp3': 'audio/mpeg',
+                '.wav': 'audio/wav',
+                '.ogg': 'audio/ogg',
+                '.aac': 'audio/aac',
+                '.flac': 'audio/flac',
+                '.mp4': 'video/mp4'
+            }
+            media_type = media_type_map.get(file_ext, 'application/octet-stream')
             
             if os.path.exists(media_file):
                 return FileResponse(
                     path=media_file,
-                    filename=f"{contentId}.{media_file.split('.')[-1]}",
-                    media_type="audio/mpeg" if content.contentType == "audio" else "video/mp4"
+                    filename=f"{contentId}{file_ext}",
+                    media_type=media_type
                 )
             else:
                 # Fallback to metadata file
