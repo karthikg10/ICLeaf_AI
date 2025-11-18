@@ -166,6 +166,58 @@ def clean_markdown_formatting(text: str) -> str:
     
     return text
 
+def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: int = 5) -> str:
+    """Get RAG context from uploaded documents for internal mode content generation."""
+    if request.mode != "internal":
+        return ""
+    
+    try:
+        # Query RAG store with the prompt
+        # Use -0.2 as min_similarity to be more permissive (same as /api/internal/search)
+        # This ensures we get results even when similarity scores are low
+        hits = rag.query(
+            request.prompt,
+            top_k=top_k,
+            min_similarity=-0.2
+        )
+        
+        if not hits:
+            return ""
+        
+        # Clean and extract context from hits
+        context_blocks = []
+        for h in hits:
+            text_content = h.get("text", "")
+            if not text_content or not isinstance(text_content, str):
+                continue
+            
+            # Clean the text
+            text_content = clean_markdown_formatting(text_content)
+            text_content = text_content.strip()
+            
+            if not text_content:
+                continue
+            
+            # Remove excessive whitespace
+            text_content = " ".join(text_content.split())
+            context_blocks.append(text_content)
+        
+        if not context_blocks:
+            return ""
+        
+        # Build context string
+        ctx_parts = []
+        for i, block in enumerate(context_blocks, 1):
+            ctx_parts.append(f"[Content Block {i}]\n{block}")
+        
+        context = "\n\n---\n\n".join(ctx_parts)
+        print(f"[CONTENT] Internal mode: Retrieved {len(context_blocks)} context blocks from uploaded documents")
+        return context
+        
+    except Exception as e:
+        print(f"[CONTENT] Error getting RAG context: {e}")
+        return ""
+
 def get_content_storage_path(user_id: str, content_id: str) -> str:
     """Get the storage path for content."""
     return f"/data/content/{user_id}/{content_id}"
@@ -213,12 +265,31 @@ async def generate_flashcard_content(request: GenerateContentRequest, config: Fl
     if not content_client:
         raise Exception("OpenAI client not configured")
     
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    
     system_prompt = f"""You are an educational content generator. Create flashcards in a clean table format with the following specifications:
 - Create 5-8 flashcards based on the topic
 - Each flashcard should have a KEY (term/concept) and Description (explanation)
 - Format as a clean table with two columns: KEY and Description
 - Difficulty: {config.difficulty}
-- User role: {request.role}
+- User role: {request.role}"""
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate flashcards. Base your content ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create flashcards based on the information in the context above
+- Use specific terms and concepts found in the documents
+- Ensure accuracy to the source material
+- If the context doesn't cover the topic fully, create flashcards based on what is available"""
+    else:
+        system_prompt += """
 
 Format the output as a clean table like this:
 | KEY | Description |
@@ -343,6 +414,9 @@ async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfi
     if not content_client:
         raise Exception("OpenAI client not configured")
 
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+
     keys = [
         "s_no","question","correct_answer","answer_desc","answer_1","answer_2","answer_3","answer_4"
     ]
@@ -355,6 +429,20 @@ async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfi
         f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}. "
         "Generate realistic, educational content."
     )
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate quiz questions. Base your content ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create quiz questions based on the information in the context above
+- Ensure questions and answers are factually accurate to the source material
+- Use specific details from the documents
+- If the context doesn't cover the topic fully, create questions based on what is available"""
 
     user_prompt = (
         f"Create quiz rows for: {request.prompt}. "
@@ -504,6 +592,10 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
     """Generate assessment in exact template format."""
     if not content_client:
         raise Exception("OpenAI client not configured")
+    
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    
     columns = [
         "question", "type", "answer_description", "levels", "total_options",
         "choice_answer_one", "choice_answer_two", "choice_answer_three", 
@@ -525,6 +617,21 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
         
         f"Create exactly 4 rows. Difficulty: {config.difficulty}."
     )
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate assessment questions. Base your content ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create assessment questions based on the information in the context above
+- Ensure questions and answers are factually accurate to the source material
+- Use specific details from the documents
+- If the context doesn't cover the topic fully, create questions based on what is available"""
+    
     user_prompt = (
         f"Create 4 assessment rows for: {request.prompt}\n"
         f"Subject: {request.subjectName or ''}\n"
@@ -684,6 +791,9 @@ async def generate_video_content(request: GenerateContentRequest, config: VideoC
     if not content_client:
         raise Exception("OpenAI client not configured")
     
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    
     # Generate the video script
     system_prompt = f"""You are a video content generator. Create engaging video content with the following specifications:
 - Duration: {config.duration_seconds} seconds
@@ -691,6 +801,20 @@ async def generate_video_content(request: GenerateContentRequest, config: VideoC
 - Include subtitles: {config.include_subtitles}
 - User role: {request.role}
 - Make it engaging and suitable for video consumption"""
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate video content. Base your content ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create video content based on the information in the context above
+- Ensure the content is factually accurate to the source material
+- Use specific details from the documents
+- If the context doesn't cover the topic fully, create content based on what is available"""
     
     user_prompt = f"""Create video content based on: {request.prompt}
 Duration: {config.duration_seconds} seconds
@@ -731,6 +855,9 @@ async def generate_audio_content(request: GenerateContentRequest, config: AudioC
     if not content_client:
         raise Exception("OpenAI client not configured")
     
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    
     # Generate the script content
     # IMPORTANT: We need ONLY the spoken script text, no meta-commentary or disclaimers
     system_prompt = f"""You are a professional script writer for audio content. Your task is to write ONLY the spoken script text that will be converted to speech using text-to-speech technology.
@@ -744,6 +871,20 @@ CRITICAL RULES:
 - Duration target: approximately {config.duration_seconds} seconds when spoken
 - Target audience: {request.role}
 - Make it engaging, conversational, and suitable for audio listening"""
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create an accurate audio script. Base your content ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create the audio script based on the information in the context above
+- Ensure the content is factually accurate to the source material
+- Use specific details from the documents
+- If the context doesn't cover the topic fully, create content based on what is available"""
     
     user_prompt = f"""Write the spoken script for an audio recording about: {request.prompt}
 
@@ -867,11 +1008,28 @@ async def generate_compiler_content(request: GenerateContentRequest, config: Com
     if not content_client:
         raise Exception("OpenAI client not configured")
     
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    
     system_prompt = f"""You are a code generator. Create code with the following specifications:
 - Language: {config.language}
 - Include tests: {config.include_tests}
 - Difficulty: {config.difficulty}
 - User role: {request.role}"""
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate code. Base your code ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create code based on the information in the context above
+- Follow coding patterns and examples from the documents
+- Ensure the code aligns with the concepts explained in the source material
+- If the context doesn't cover the topic fully, create code based on what is available"""
     
     user_prompt = f"""Create code based on: {request.prompt}
 Language: {config.language}
@@ -893,6 +1051,9 @@ async def generate_pdf_content(request: GenerateContentRequest, content_id: str,
     """Generate PDF with STRICT page count control."""
     if not content_client:
         raise Exception("OpenAI client not configured")
+    
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
     
     pdf_config = request.contentConfig.get('pdf', {})
     num_pages = int(pdf_config.get('num_pages', 5))
@@ -926,6 +1087,21 @@ FORMATTING RULES:
 - Write as a professional document
 
 WORD COUNT: {total_words_needed} words minimum"""
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate content. Base your content ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create content based on the information in the context above
+- Ensure the content is factually accurate to the source material
+- Use specific details and examples from the documents
+- Expand on the concepts found in the context to reach the required word count
+- If the context doesn't cover the topic fully, create content based on what is available"""
 
     user_prompt = f"""Create a {num_pages}-page document about: {request.prompt}
 
@@ -1027,6 +1203,9 @@ async def generate_pdf_content_with_path(
     if not content_client:
         raise Exception("OpenAI client not configured")
     
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    
     pdf_config = request.contentConfig.get('pdf', {})
     num_pages = int(pdf_config.get('num_pages', 5))
     target_audience = pdf_config.get('target_audience', 'general')
@@ -1060,6 +1239,21 @@ FORMATTING RULES:
 - Write as a professional document
 
 WORD COUNT: {total_words_needed} words minimum"""
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate content. Base your content ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create content based on the information in the context above
+- Ensure the content is factually accurate to the source material
+- Use specific details and examples from the documents
+- Expand on the concepts found in the context to reach the required word count
+- If the context doesn't cover the topic fully, create content based on what is available"""
 
     user_prompt = f"""Create a {num_pages}-page document about: {request.prompt}
 
@@ -1155,6 +1349,9 @@ async def generate_ppt_content(request: GenerateContentRequest, content_id: str,
     if not content_client:
         raise Exception("OpenAI client not configured")
     
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    
     ppt_config = request.contentConfig.get('ppt', {})
     num_slides = int(ppt_config.get('num_slides', 10))
     target_audience = ppt_config.get('target_audience', 'general')
@@ -1190,6 +1387,20 @@ DETAILED CONTENT RULES:
 - Include relevant statistics or data
 - Make it informative, not just pretty
 - Rich with actual information"""
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate slides. Base your content ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create slides based on the information in the context above
+- Ensure the content is factually accurate to the source material
+- Use specific details, examples, and data from the documents
+- If the context doesn't cover the topic fully, create slides based on what is available"""
 
     user_prompt = f"""Create {num_slides} detailed, information-rich slides about: {request.prompt}
 
@@ -1313,6 +1524,9 @@ async def generate_ppt_content_with_path(
     if not content_client:
         raise Exception("OpenAI client not configured")
     
+    # Get RAG context for internal mode
+    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    
     ppt_config = request.contentConfig.get('ppt', {})
     num_slides = int(ppt_config.get('num_slides', 10))
     target_audience = ppt_config.get('target_audience', 'general')
@@ -1349,6 +1563,20 @@ DETAILED CONTENT RULES:
 - Include relevant statistics or data
 - Make it informative, not just pretty
 - Rich with actual information"""
+    
+    if rag_context:
+        system_prompt += f"""
+
+IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate slides. Base your content ONLY on the information provided in the context blocks.
+
+CONTEXT FROM UPLOADED DOCUMENTS:
+{rag_context}
+
+Instructions:
+- Create slides based on the information in the context above
+- Ensure the content is factually accurate to the source material
+- Use specific details, examples, and data from the documents
+- If the context doesn't cover the topic fully, create slides based on what is available"""
 
     user_prompt = f"""Create {num_slides} detailed, information-rich slides about: {request.prompt}
 
