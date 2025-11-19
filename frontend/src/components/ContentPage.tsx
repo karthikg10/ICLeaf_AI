@@ -29,6 +29,16 @@ type GenerateContentResponse = {
   status: ContentStatus;
   message: string;
   estimated_completion_time?: number;
+  metadata?: {
+    rag_metadata?: {
+      documents_used?: string[];
+      num_blocks?: number;
+      requested_docIds?: string[];
+      internal_mode?: boolean;
+      rag_used?: boolean;
+      error?: string;
+    };
+  };
 };
 
 type ContentListResponse = {
@@ -966,6 +976,49 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                     <div><strong>Status:</strong> {generationResult.status}</div>
                     {generationResult.estimated_completion_time && (
                       <div><strong>Estimated Time:</strong> {generationResult.estimated_completion_time} seconds</div>
+                    )}
+                    {/* RAG Metadata Display for Internal Mode */}
+                    {generationResult.metadata?.rag_metadata && (
+                      <div style={{ marginTop: 16, padding: 12, background: "#f8f9fa", borderRadius: 4, border: "1px solid #dee2e6" }}>
+                        <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 14 }}>
+                          📄 Document Usage (Internal Mode)
+                        </div>
+                        {generationResult.metadata.rag_metadata.rag_used ? (
+                          <>
+                            {generationResult.metadata.rag_metadata.documents_used && generationResult.metadata.rag_metadata.documents_used.length > 0 ? (
+                              <div style={{ marginBottom: 8 }}>
+                                <strong>Documents Used:</strong>{" "}
+                                <span style={{ color: "#0a7a3d" }}>
+                                  {generationResult.metadata.rag_metadata.documents_used.join(", ") || "None found"}
+                                </span>
+                              </div>
+                            ) : (
+                              <div style={{ marginBottom: 8, color: "#856404" }}>
+                                <strong>⚠️ No documents found matching your request</strong>
+                              </div>
+                            )}
+                            {generationResult.metadata.rag_metadata.requested_docIds && generationResult.metadata.rag_metadata.requested_docIds.length > 0 && (
+                              <div style={{ marginBottom: 8, fontSize: 12, color: "#6c757d" }}>
+                                <strong>Requested docIds:</strong> {generationResult.metadata.rag_metadata.requested_docIds.join(", ")}
+                              </div>
+                            )}
+                            {generationResult.metadata.rag_metadata.num_blocks !== undefined && (
+                              <div style={{ marginBottom: 8, fontSize: 12, color: "#6c757d" }}>
+                                <strong>Context Blocks Retrieved:</strong> {generationResult.metadata.rag_metadata.num_blocks}
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <div style={{ color: "#856404" }}>
+                            <strong>⚠️ RAG not used</strong>
+                            {generationResult.metadata.rag_metadata.error && (
+                              <div style={{ fontSize: 12, marginTop: 4 }}>
+                                Error: {generationResult.metadata.rag_metadata.error}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </>
                 )}

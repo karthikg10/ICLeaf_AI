@@ -5,7 +5,7 @@ import json
 import asyncio
 import shutil
 import requests
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, List, Optional, Tuple, Union, Any, NamedTuple
 from datetime import datetime
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
@@ -38,6 +38,12 @@ _download_tracking: Dict[str, List[Dict]] = {}  # contentId -> [{"timestamp": ..
 
 # Content generation client
 content_client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else None
+
+
+class RAGContextResult(NamedTuple):
+    """Result from RAG context retrieval, containing the context string and metadata about documents used."""
+    context: str
+    metadata: Dict[str, Any]  # Contains: documents_used (list of docIds/filenames), num_blocks, requested_docIds
 
 
 def extract_openai_response(response):
@@ -166,14 +172,14 @@ def clean_markdown_formatting(text: str) -> str:
     
     return text
 
-def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: int = 5) -> str:
+def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: int = 5) -> RAGContextResult:
     """Get RAG context from uploaded documents for internal mode content generation.
     
     If docIds are provided, filters results to only include chunks from those documents.
-    docIds should be document names/filenames that match the docName or filename in metadata.
+    Returns a RAGContextResult containing the context string and metadata about documents used.
     """
     if request.mode != "internal":
-        return ""
+        return RAGContextResult(context="", metadata={"documents_used": [], "num_blocks": 0, "requested_docIds": []})
     
     try:
         # Query RAG store with the prompt
@@ -183,17 +189,21 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
         # If docIds are provided, we need to query for each docId separately
         # because rag.query() only supports filtering by a single doc_name
         all_hits = []
+        requested_doc_ids = []
+        documents_found = set()  # Track which documents were actually found and used
         
         if request.docIds and len(request.docIds) > 0:
             # Filter by specific documents
             doc_ids_set = set(doc_id.strip() for doc_id in request.docIds if doc_id and doc_id.strip())
-            print(f"[CONTENT] Internal mode: Filtering by docIds: {list(doc_ids_set)}")
+            requested_doc_ids = list(doc_ids_set)
+            print(f"[CONTENT] Internal mode: Filtering by docIds: {requested_doc_ids}")
             
             # Query each document separately and combine results
             hits_per_doc = max(1, top_k // len(doc_ids_set))  # Distribute top_k across documents
             
             for doc_id in doc_ids_set:
                 try:
+                    doc_hits = []
                     # First try filtering by docId (UUID) if it looks like a UUID
                     # Otherwise try by doc_name/filename (legacy support)
                     if len(doc_id) == 36 and doc_id.count('-') == 4:  # UUID format
@@ -211,7 +221,18 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                             min_similarity=-0.2,
                             doc_name=doc_id
                         )
-                    all_hits.extend(doc_hits)
+                    
+                    if doc_hits:
+                        # Track which documents were found
+                        for hit in doc_hits:
+                            meta = hit.get("meta", {})
+                            doc_id_used = meta.get("docId", "") or meta.get("docName", "") or meta.get("filename", "")
+                            if doc_id_used:
+                                documents_found.add(doc_id_used)
+                        all_hits.extend(doc_hits)
+                        print(f"[CONTENT] Found {len(doc_hits)} chunks from docId '{doc_id}'")
+                    else:
+                        print(f"[CONTENT] No chunks found for docId '{doc_id}'")
                 except Exception as e:
                     print(f"[CONTENT] Error querying docId '{doc_id}': {e}")
                     continue
@@ -237,6 +258,10 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                         if any(doc_id == doc_id_in_meta or doc_id in doc_name or doc_id in filename or doc_name == doc_id or filename == doc_id 
                                for doc_id in doc_ids_set):
                             filtered_hits.append(hit)
+                            # Track which documents were found
+                            doc_id_used = doc_id_in_meta or doc_name or filename
+                            if doc_id_used:
+                                documents_found.add(doc_id_used)
                     all_hits = filtered_hits[:top_k]
         else:
             # No docIds specified, query all documents
@@ -245,10 +270,25 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                 top_k=top_k,
                 min_similarity=-0.2
             )
+            # Track all documents found
+            for hit in all_hits:
+                meta = hit.get("meta", {})
+                doc_id_used = meta.get("docId", "") or meta.get("docName", "") or meta.get("filename", "")
+                if doc_id_used:
+                    documents_found.add(doc_id_used)
         
         if not all_hits:
             print(f"[CONTENT] Internal mode: No context retrieved from RAG query")
-            return ""
+            return RAGContextResult(
+                context="",
+                metadata={
+                    "documents_used": [],
+                    "num_blocks": 0,
+                    "requested_docIds": requested_doc_ids,
+                    "internal_mode": True,
+                    "rag_used": False
+                }
+            )
         
         # Clean and extract context from hits
         context_blocks = []
@@ -282,7 +322,16 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                 break
         
         if not context_blocks:
-            return ""
+            return RAGContextResult(
+                context="",
+                metadata={
+                    "documents_used": [],
+                    "num_blocks": 0,
+                    "requested_docIds": requested_doc_ids,
+                    "internal_mode": True,
+                    "rag_used": False
+                }
+            )
         
         # Build context string
         ctx_parts = []
@@ -292,11 +341,32 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
         context = "\n\n---\n\n".join(ctx_parts)
         doc_info = f" from {len(request.docIds)} specified documents" if request.docIds else ""
         print(f"[CONTENT] Internal mode: Retrieved {len(context_blocks)} context blocks{doc_info} from uploaded documents")
-        return context
+        print(f"[CONTENT] Documents used: {list(documents_found)}")
+        
+        return RAGContextResult(
+            context=context,
+            metadata={
+                "documents_used": list(documents_found),
+                "num_blocks": len(context_blocks),
+                "requested_docIds": requested_doc_ids,
+                "internal_mode": True,
+                "rag_used": True
+            }
+        )
         
     except Exception as e:
         print(f"[CONTENT] Error getting RAG context: {e}")
-        return ""
+        return RAGContextResult(
+            context="",
+            metadata={
+                "documents_used": [],
+                "num_blocks": 0,
+                "requested_docIds": requested_doc_ids if 'requested_doc_ids' in locals() else [],
+                "internal_mode": True,
+                "rag_used": False,
+                "error": str(e)
+            }
+        )
 
 def get_content_storage_path(user_id: str, content_id: str) -> str:
     """Get the storage path for content."""
@@ -346,7 +416,8 @@ async def generate_flashcard_content(request: GenerateContentRequest, config: Fl
         raise Exception("OpenAI client not configured")
     
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
     
     system_prompt = f"""You are an educational content generator. Create flashcards in a clean table format with the following specifications:
 - Create 5-8 flashcards based on the topic
@@ -420,10 +491,10 @@ def _parse_markdown_table_to_rows(table_text: str) -> List[Tuple[str, str]]:
             rows.append((key_col, desc_col))
     return rows
 
-def _write_flashcards_csv_xlsx(storage_path: str, rows: List[Tuple[str, str]]) -> Tuple[str, str]:
+def _write_flashcards_csv_xlsx(storage_path: str, rows: List[Tuple[str, str]], base_filename: str = "flashcards") -> Tuple[str, str]:
     """Write flashcards to CSV and XLSX files WITHOUT header row. Returns (csv_path, xlsx_path)."""
-    csv_path = os.path.join(storage_path, "flashcards.csv")
-    xlsx_path = os.path.join(storage_path, "flashcards.xlsx")
+    csv_path = os.path.join(storage_path, f"{base_filename}.csv")
+    xlsx_path = os.path.join(storage_path, f"{base_filename}.xlsx")
 
     # CSV - NO HEADER ROW
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
@@ -495,7 +566,8 @@ async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfi
         raise Exception("OpenAI client not configured")
 
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
 
     keys = [
         "s_no","question","correct_answer","answer_desc","answer_1","answer_2","answer_3","answer_4"
@@ -572,7 +644,7 @@ Instructions:
         rows.append(norm)
     return rows
 
-def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]]]) -> Tuple[str, str]:
+def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]]], base_filename: str = "quiz") -> Tuple[str, str]:
     """Write quiz rows to CSV/XLSX with the specified headers order including ANSWER DESC."""
     headers = [
         "S.No.", "QUESTION", "CORRECT ANSWER", "ANSWER DESC",
@@ -589,8 +661,8 @@ def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]
         "ANSWER 4": "answer_4",
     }
 
-    csv_path = os.path.join(storage_path, "quiz.csv")
-    xlsx_path = os.path.join(storage_path, "quiz.xlsx")
+    csv_path = os.path.join(storage_path, f"{base_filename}.csv")
+    xlsx_path = os.path.join(storage_path, f"{base_filename}.xlsx")
 
     # CSV
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
@@ -674,7 +746,8 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
         raise Exception("OpenAI client not configured")
     
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
     
     columns = [
         "question", "type", "answer_description", "levels", "total_options",
@@ -746,11 +819,11 @@ Instructions:
     
     return norm_rows
 
-def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], subject_name: str = "", topic_name: str = "") -> Tuple[str, str]:
+def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], subject_name: str = "", topic_name: str = "", base_filename: str = "assessment") -> Tuple[str, str]:
     """Write assessment rows in exact template format."""
     
-    csv_path = os.path.join(storage_path, "assessment.csv")
-    xlsx_path = os.path.join(storage_path, "assessment.xlsx")
+    csv_path = os.path.join(storage_path, f"{base_filename}.csv")
+    xlsx_path = os.path.join(storage_path, f"{base_filename}.xlsx")
 
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -866,13 +939,14 @@ def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], su
 
     return csv_path, xlsx_path
 
-async def generate_video_content(request: GenerateContentRequest, config: VideoConfig, content_id: str, storage_path: str) -> str:
+async def generate_video_content(request: GenerateContentRequest, config: VideoConfig, content_id: str, storage_path: str, base_filename: str = "video") -> str:
     """Generate video script file."""
     if not content_client:
         raise Exception("OpenAI client not configured")
     
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
     
     # Generate the video script
     system_prompt = f"""You are a video content generator. Create engaging video content with the following specifications:
@@ -915,7 +989,7 @@ Make it engaging and visually appealing for video viewing."""
     
     # Save script file
     try:
-        script_path = os.path.join(storage_path, "video_script.txt")
+        script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(f"Video Script:\n\n{script_content}\n\n")
             f.write(f"Duration: {config.duration_seconds} seconds\n")
@@ -925,18 +999,19 @@ Make it engaging and visually appealing for video viewing."""
         return script_path
             
     except Exception as e:
-        script_path = os.path.join(storage_path, "video_script.txt")
+        script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(f"Error generating video: {str(e)}\n\nScript: {script_content}")
         return script_path
 
-async def generate_audio_content(request: GenerateContentRequest, config: AudioConfig, content_id: str, storage_path: str) -> str:
+async def generate_audio_content(request: GenerateContentRequest, config: AudioConfig, content_id: str, storage_path: str, base_filename: str = "audio") -> str:
     """Generate audio script file and MP3 audio file."""
     if not content_client:
         raise Exception("OpenAI client not configured")
     
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
     
     # Generate the script content
     # IMPORTANT: We need ONLY the spoken script text, no meta-commentary or disclaimers
@@ -1028,11 +1103,11 @@ Begin the script now:"""
     
     # Save script file
     try:
-        script_path = os.path.join(storage_path, "audio_script.txt")
+        script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(script_content)
     except Exception as e:
-        script_path = os.path.join(storage_path, "audio_script.txt")
+        script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(f"Error generating audio: {str(e)}\n\nScript: {script_content}")
     
@@ -1059,8 +1134,8 @@ Begin the script now:"""
         # Determine output format
         audio_format = config.format.lower() if config.format else "mp3"
         
-        # Generate MP3 file path
-        audio_path = os.path.join(storage_path, f"audio.{audio_format}")
+        # Generate MP3 file path using base_filename
+        audio_path = os.path.join(storage_path, f"{base_filename}.{audio_format}")
         
         # Generate the audio file using TTS
         success = await media_generator.generate_audio_file(
@@ -1089,7 +1164,8 @@ async def generate_compiler_content(request: GenerateContentRequest, config: Com
         raise Exception("OpenAI client not configured")
     
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
     
     system_prompt = f"""You are a code generator. Create code with the following specifications:
 - Language: {config.language}
@@ -1133,7 +1209,8 @@ async def generate_pdf_content(request: GenerateContentRequest, content_id: str,
         raise Exception("OpenAI client not configured")
     
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
     
     pdf_config = request.contentConfig.get('pdf', {})
     num_pages = int(pdf_config.get('num_pages', 5))
@@ -1284,7 +1361,8 @@ async def generate_pdf_content_with_path(
         raise Exception("OpenAI client not configured")
     
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
     
     pdf_config = request.contentConfig.get('pdf', {})
     num_pages = int(pdf_config.get('num_pages', 5))
@@ -1430,7 +1508,8 @@ async def generate_ppt_content(request: GenerateContentRequest, content_id: str,
         raise Exception("OpenAI client not configured")
     
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
     
     ppt_config = request.contentConfig.get('ppt', {})
     num_slides = int(ppt_config.get('num_slides', 10))
@@ -1605,7 +1684,8 @@ async def generate_ppt_content_with_path(
         raise Exception("OpenAI client not configured")
     
     # Get RAG context for internal mode
-    rag_context = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    rag_context = rag_result.context
     
     ppt_config = request.contentConfig.get('ppt', {})
     num_slides = int(ppt_config.get('num_slides', 10))
@@ -1781,6 +1861,17 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         except ValueError as e:
             raise Exception(f"Invalid file path: {str(e)}")
     
+    # Get RAG metadata for internal mode (to track which documents were used)
+    rag_metadata = {}
+    if request.mode == "internal":
+        try:
+            rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+            rag_metadata = rag_result.metadata
+            print(f"[CONTENT] RAG metadata: {rag_metadata}")
+        except Exception as e:
+            print(f"[CONTENT] Error getting RAG metadata: {e}")
+            rag_metadata = {"error": str(e), "rag_used": False}
+    
     # Create content object
     content = GeneratedContent(
         contentId=content_id,
@@ -1796,7 +1887,8 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             "subjectName": request.subjectName,
             "topicName": request.topicName,
             "customFileName": request.customFileName,
-            "customFilePath": request.customFilePath
+            "customFilePath": request.customFilePath,
+            "rag_metadata": rag_metadata  # Add RAG metadata to track document usage
         }
     )
     
@@ -1833,7 +1925,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             )
             generated_content = await generate_flashcard_content(request, flashcard_config)
             rows = _parse_markdown_table_to_rows(generated_content)
-            csv_path, xlsx_path = _write_flashcards_csv_xlsx(storage_path, rows)
+            csv_path, xlsx_path = _write_flashcards_csv_xlsx(storage_path, rows, base_filename=base_filename)
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "quiz" and request.contentConfig.get('quiz'):
@@ -1844,7 +1936,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
                 question_types=quiz_config_dict.get('question_types', ['multiple_choice'])
             )
             rows = await generate_quiz_table(request, quiz_config)
-            csv_path, xlsx_path = _write_quiz_csv_xlsx(storage_path, rows)
+            csv_path, xlsx_path = _write_quiz_csv_xlsx(storage_path, rows, base_filename=base_filename)
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "assessment" and request.contentConfig.get('assessment'):
@@ -1852,12 +1944,13 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             assessment_config = AssessmentConfig(**assessment_config_dict)
             rows = await generate_assessment_table(request, assessment_config)
             
-            # Pass subject and topic names
+            # Pass subject and topic names and base_filename
             csv_path, xlsx_path = _write_assessment_csv_xlsx(
                 storage_path, 
                 rows,
                 subject_name=request.subjectName or "Subject",
-                topic_name=request.topicName or "Topic"
+                topic_name=request.topicName or "Topic",
+                base_filename=base_filename
             )
             
             actual_filename = os.path.basename(xlsx_path)
@@ -1865,13 +1958,13 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         elif request.contentType == "video" and request.contentConfig.get('video'):
             video_config_dict = request.contentConfig.get('video')
             video_config = VideoConfig(**video_config_dict)
-            generated_content = await generate_video_content(request, video_config, content_id, storage_path)
+            generated_content = await generate_video_content(request, video_config, content_id, storage_path, base_filename=base_filename)
             actual_filename = os.path.basename(generated_content)
             file_path = generated_content
         elif request.contentType == "audio" and request.contentConfig.get('audio'):
             audio_config_dict = request.contentConfig.get('audio')
             audio_config = AudioConfig(**audio_config_dict)
-            generated_content = await generate_audio_content(request, audio_config, content_id, storage_path)
+            generated_content = await generate_audio_content(request, audio_config, content_id, storage_path, base_filename=base_filename)
             actual_filename = os.path.basename(generated_content)
             file_path = generated_content
         elif request.contentType == "compiler" and request.contentConfig.get('compiler'):
