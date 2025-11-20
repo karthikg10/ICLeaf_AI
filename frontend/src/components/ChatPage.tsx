@@ -43,6 +43,7 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
   const [subjectId, setSubjectId] = useState("");
   const [topicId, setTopicId] = useState("");
   const [docName, setDocName] = useState("");
+  const [docIds, setDocIds] = useState("");  // Comma-separated document IDs
   
   // Chat state
   const [input, setInput] = useState("");
@@ -119,6 +120,13 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
         if (subjectId) requestBody.subjectId = subjectId;
         if (topicId) requestBody.topicId = topicId;
         if (docName) requestBody.docName = docName;
+        // Parse comma-separated docIds and add to request
+        if (docIds) {
+          const docIdsArray = docIds.split(",").map(id => id.trim()).filter(id => id);
+          if (docIdsArray.length > 0) {
+            requestBody.docIds = docIdsArray;
+          }
+        }
       }
 
       const response = await fetch(`${apiUrl}/api/chatbot/query`, {
@@ -267,6 +275,23 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
                 borderRadius: 4,
                 fontSize: 12,
                 width: 150,
+              }}
+            />
+          </div>
+          
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <label style={{ fontSize: 14, fontWeight: 600, minWidth: 60 }}>Doc IDs:</label>
+            <input
+              type="text"
+              value={docIds}
+              onChange={(e) => setDocIds(e.target.value)}
+              placeholder="Comma-separated docIds (optional)"
+              style={{
+                padding: "6px 8px",
+                border: "1px solid #ccc",
+                borderRadius: 4,
+                fontSize: 12,
+                width: 250,
               }}
             />
           </div>

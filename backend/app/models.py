@@ -29,6 +29,7 @@ class ChatRequest(BaseModel):
     docName: Optional[str] = None
     subjectName: Optional[str] = None
     topicName: Optional[str] = None
+    docIds: List[str] = []  # For filtering by specific document IDs in internal mode
     history: List[SessionMessage] = []
     top_k: int = 4
 

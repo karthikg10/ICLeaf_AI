@@ -215,15 +215,86 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         topic_id_filter = req.topicId if req.topicId else None
         doc_name_filter = req.docName if req.docName else None
 
-        # Query RAG store
-        hits = rag.query(
-            req.message,
-            top_k=min(req.top_k, 5),
-            min_similarity=0.1,
-            subject_id=subject_id_filter,
-            topic_id=topic_id_filter,
-            doc_name=doc_name_filter
-        )
+        # Handle docIds filtering (similar to content generation)
+        hits = []
+        if req.docIds and len(req.docIds) > 0:
+            # Filter by specific documents
+            doc_ids_set = set(doc_id.strip() for doc_id in req.docIds if doc_id and doc_id.strip())
+            print(f"[CHATBOT] Internal mode: Filtering by docIds: {list(doc_ids_set)}")
+            
+            # Query each document separately and combine results
+            hits_per_doc = max(1, min(req.top_k, 5) // len(doc_ids_set))
+            all_hits = []
+            
+            for doc_id in doc_ids_set:
+                try:
+                    # First try filtering by docId (UUID) if it looks like a UUID
+                    # Otherwise try by doc_name/filename (legacy support)
+                    if len(doc_id) == 36 and doc_id.count('-') == 4:  # UUID format
+                        doc_hits = rag.query(
+                            req.message,
+                            top_k=hits_per_doc,
+                            min_similarity=-0.2,  # More permissive like content generation
+                            subject_id=subject_id_filter,
+                            topic_id=topic_id_filter,
+                            doc_id=doc_id
+                        )
+                    else:
+                        # Legacy: filter by doc_name or filename
+                        doc_hits = rag.query(
+                            req.message,
+                            top_k=hits_per_doc,
+                            min_similarity=-0.2,
+                            subject_id=subject_id_filter,
+                            topic_id=topic_id_filter,
+                            doc_name=doc_id
+                        )
+                    
+                    if doc_hits:
+                        all_hits.extend(doc_hits)
+                        print(f"[CHATBOT] Found {len(doc_hits)} chunks from docId '{doc_id}'")
+                    else:
+                        print(f"[CHATBOT] No chunks found for docId '{doc_id}'")
+                except Exception as e:
+                    print(f"[CHATBOT] Error querying docId '{doc_id}': {e}")
+                    continue
+            
+            # If no results from filtered query, try without docId filter as fallback
+            if not all_hits:
+                print(f"[CHATBOT] No results with docIds filter, trying without filter as fallback")
+                all_hits = rag.query(
+                    req.message,
+                    top_k=min(req.top_k, 5),
+                    min_similarity=-0.2,
+                    subject_id=subject_id_filter,
+                    topic_id=topic_id_filter,
+                    doc_name=doc_name_filter
+                )
+                # Then manually filter by docIds
+                if all_hits:
+                    filtered_hits = []
+                    for hit in all_hits:
+                        meta = hit.get("meta", {})
+                        doc_id_in_meta = meta.get("docId", "")
+                        doc_name = meta.get("docName", meta.get("filename", ""))
+                        filename = meta.get("filename", "")
+                        # Check if this hit matches any of the requested docIds
+                        if any(doc_id == doc_id_in_meta or doc_id in doc_name or doc_id in filename or doc_name == doc_id or filename == doc_id 
+                               for doc_id in doc_ids_set):
+                            filtered_hits.append(hit)
+                    all_hits = filtered_hits[:min(req.top_k, 5)]
+            
+            hits = all_hits
+        else:
+            # No docIds specified, use regular query with other filters
+            hits = rag.query(
+                req.message,
+                top_k=min(req.top_k, 5),
+                min_similarity=-0.2,  # More permissive like content generation
+                subject_id=subject_id_filter,
+                topic_id=topic_id_filter,
+                doc_name=doc_name_filter
+            )
 
         print(f"[CHATBOT] Internal mode query: '{req.message[:50]}...'")
         print(f"[CHATBOT] Found {len(hits)} RAG hits")
