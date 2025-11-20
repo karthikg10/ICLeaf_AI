@@ -15,7 +15,6 @@ from reportlab.lib import colors
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
-import csv
 import xlsxwriter
 import re
 from .models import (
@@ -491,17 +490,9 @@ def _parse_markdown_table_to_rows(table_text: str) -> List[Tuple[str, str]]:
             rows.append((key_col, desc_col))
     return rows
 
-def _write_flashcards_csv_xlsx(storage_path: str, rows: List[Tuple[str, str]], base_filename: str = "flashcards") -> Tuple[str, str]:
-    """Write flashcards to CSV and XLSX files WITHOUT header row. Returns (csv_path, xlsx_path)."""
-    csv_path = os.path.join(storage_path, f"{base_filename}.csv")
+def _write_flashcards_csv_xlsx(storage_path: str, rows: List[Tuple[str, str]], base_filename: str = "flashcards") -> str:
+    """Write flashcards to XLSX file WITHOUT header row. Returns xlsx_path."""
     xlsx_path = os.path.join(storage_path, f"{base_filename}.xlsx")
-
-    # CSV - NO HEADER ROW
-    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        # Write data directly without header
-        for k, d in rows:
-            writer.writerow([k, d])
 
     # XLSX - NO HEADER ROW
     workbook = xlsxwriter.Workbook(xlsx_path)
@@ -517,7 +508,7 @@ def _write_flashcards_csv_xlsx(storage_path: str, rows: List[Tuple[str, str]], b
     worksheet.set_column(1, 1, 80)
     workbook.close()
 
-    return csv_path, xlsx_path
+    return xlsx_path
 
 async def generate_quiz_content(request: GenerateContentRequest, config: QuizConfig) -> str:
     """Generate quiz content in a structured table format."""
@@ -644,8 +635,8 @@ Instructions:
         rows.append(norm)
     return rows
 
-def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]]], base_filename: str = "quiz") -> Tuple[str, str]:
-    """Write quiz rows to CSV/XLSX with the specified headers order including ANSWER DESC."""
+def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]]], base_filename: str = "quiz") -> str:
+    """Write quiz rows to XLSX with the specified headers order including ANSWER DESC."""
     headers = [
         "S.No.", "QUESTION", "CORRECT ANSWER", "ANSWER DESC",
         "ANSWER 1", "ANSWER 2", "ANSWER 3", "ANSWER 4"
@@ -661,27 +652,7 @@ def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]
         "ANSWER 4": "answer_4",
     }
 
-    csv_path = os.path.join(storage_path, f"{base_filename}.csv")
     xlsx_path = os.path.join(storage_path, f"{base_filename}.xlsx")
-
-    # CSV
-    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(headers)
-        for r in rows:
-            row_data = []
-            for h in headers:
-                key = key_map[h]
-                value = r.get(key, "")
-                # Convert S.No. and CORRECT ANSWER to integers for CSV
-                if h == "S.No." or h == "CORRECT ANSWER":
-                    try:
-                        row_data.append(int(value) if value else 0)
-                    except (ValueError, TypeError):
-                        row_data.append(0)
-                else:
-                    row_data.append(str(value) if value else "")
-            writer.writerow(row_data)
 
     # XLSX
     workbook = xlsxwriter.Workbook(xlsx_path)
@@ -706,7 +677,7 @@ def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]
     ws.set_column(0, len(headers)-1, 22)
     workbook.close()
 
-    return csv_path, xlsx_path
+    return xlsx_path
 
 async def generate_assessment_content(request: GenerateContentRequest, config: AssessmentConfig) -> str:
     """Generate assessment content."""
@@ -819,50 +790,12 @@ Instructions:
     
     return norm_rows
 
-def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], subject_name: str = "", topic_name: str = "", base_filename: str = "assessment") -> Tuple[str, str]:
-    """Write assessment rows in exact template format."""
+def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], subject_name: str = "", topic_name: str = "", base_filename: str = "assessment") -> str:
+    """Write assessment rows in exact template format to XLSX."""
     
-    csv_path = os.path.join(storage_path, f"{base_filename}.csv")
     xlsx_path = os.path.join(storage_path, f"{base_filename}.xlsx")
 
-    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        
-        # Row 1: Subject header only
-        row1 = [subject_name] + [''] * 12
-        writer.writerow(row1)
-        
-        # Row 2: Column labels
-        row2 = [
-            topic_name,
-            "type",
-            "answer description", 
-            "levels",
-            "total options",
-            '', '', '', '', '', '', '', ''
-        ]
-        writer.writerow(row2)
-        
-        # Rows 3+: Data
-        for r in rows:
-            data_row = [
-                r.get("question", ""),
-                r.get("type", ""),
-                r.get("answer_description", ""),
-                r.get("levels", ""),
-                r.get("total_options", ""),
-                r.get("choice_answer_one", ""),
-                r.get("choice_answer_two", ""),
-                r.get("choice_answer_three", ""),
-                r.get("choice_answer_four", ""),
-                r.get("choice_answer_five", ""),
-                r.get("correct_answers", ""),
-                r.get("tag1", ""),      # ← FIX: Use tag1 from data, NOT subject_name
-                r.get("tag2", ""),      # ← FIX: Use tag2 from data, NOT topic_name
-            ]
-            writer.writerow(data_row)
-
-    # XLSX Format: Same as CSV
+    # XLSX Format
     workbook = xlsxwriter.Workbook(xlsx_path)
     ws = workbook.add_worksheet("Sheet1")
     
@@ -937,7 +870,7 @@ def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], su
     
     workbook.close()
 
-    return csv_path, xlsx_path
+    return xlsx_path
 
 async def generate_video_content(request: GenerateContentRequest, config: VideoConfig, content_id: str, storage_path: str, base_filename: str = "video") -> str:
     """Generate video script file."""
@@ -1925,7 +1858,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             )
             generated_content = await generate_flashcard_content(request, flashcard_config)
             rows = _parse_markdown_table_to_rows(generated_content)
-            csv_path, xlsx_path = _write_flashcards_csv_xlsx(storage_path, rows, base_filename=base_filename)
+            xlsx_path = _write_flashcards_csv_xlsx(storage_path, rows, base_filename=base_filename)
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "quiz" and request.contentConfig.get('quiz'):
@@ -1936,7 +1869,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
                 question_types=quiz_config_dict.get('question_types', ['multiple_choice'])
             )
             rows = await generate_quiz_table(request, quiz_config)
-            csv_path, xlsx_path = _write_quiz_csv_xlsx(storage_path, rows, base_filename=base_filename)
+            xlsx_path = _write_quiz_csv_xlsx(storage_path, rows, base_filename=base_filename)
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "assessment" and request.contentConfig.get('assessment'):
@@ -1945,7 +1878,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             rows = await generate_assessment_table(request, assessment_config)
             
             # Pass subject and topic names and base_filename
-            csv_path, xlsx_path = _write_assessment_csv_xlsx(
+            xlsx_path = _write_assessment_csv_xlsx(
                 storage_path, 
                 rows,
                 subject_name=request.subjectName or "Subject",
