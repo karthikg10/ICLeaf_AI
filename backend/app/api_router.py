@@ -259,31 +259,6 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                     print(f"[CHATBOT] Error querying docId '{doc_id}': {e}")
                     continue
             
-            # If no results from filtered query, try without docId filter as fallback
-            if not all_hits:
-                print(f"[CHATBOT] No results with docIds filter, trying without filter as fallback")
-                all_hits = rag.query(
-                    req.message,
-                    top_k=min(req.top_k, 5),
-                    min_similarity=-0.2,
-                    subject_id=subject_id_filter,
-                    topic_id=topic_id_filter,
-                    doc_name=doc_name_filter
-                )
-                # Then manually filter by docIds
-                if all_hits:
-                    filtered_hits = []
-                    for hit in all_hits:
-                        meta = hit.get("meta", {})
-                        doc_id_in_meta = meta.get("docId", "")
-                        doc_name = meta.get("docName", meta.get("filename", ""))
-                        filename = meta.get("filename", "")
-                        # Check if this hit matches any of the requested docIds
-                        if any(doc_id == doc_id_in_meta or doc_id in doc_name or doc_id in filename or doc_name == doc_id or filename == doc_id 
-                               for doc_id in doc_ids_set):
-                            filtered_hits.append(hit)
-                    all_hits = filtered_hits[:min(req.top_k, 5)]
-            
             hits = all_hits
         else:
             # No docIds specified, use regular query with other filters
@@ -515,6 +490,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
 
 
     # CLOUD (web / YouTube / GitHub) mode
+    print(f"[CHATBOT] Cloud mode query: '{req.message[:50]}...'")
     if deps.TAVILY_API_KEY:
         try:
             web_results = await wc.tavily_search(req.message, deps.TAVILY_API_KEY, max_results=5)
@@ -535,8 +511,9 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                             break
                     except Exception:
                         continue
-        except Exception:
-            pass
+            print(f"[CHATBOT] Added {len([s for s in sources if 'YouTube' not in s.title and 'GitHub' not in s.title])} web sources from Tavily")
+        except Exception as e:
+            print(f"[CHATBOT] Tavily search error: {e}")
 
     if len(context_blocks) < 8 and deps.YOUTUBE_API_KEY:
         try:
@@ -548,8 +525,9 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                     context_blocks.append(transcript)
                 if len(context_blocks) >= 8:
                     break
-        except Exception:
-            pass
+            print(f"[CHATBOT] Added {len([s for s in sources if 'YouTube' in s.title])} YouTube sources")
+        except Exception as e:
+            print(f"[CHATBOT] YouTube search error: {e}")
 
     if len(context_blocks) < 8:
         try:
@@ -562,8 +540,12 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                     context_blocks.append(text)
                 if len(context_blocks) >= 8:
                     break
-        except Exception:
-            pass
+            print(f"[CHATBOT] Added {len([s for s in sources if 'GitHub' in s.title])} GitHub sources")
+        except Exception as e:
+            print(f"[CHATBOT] GitHub search error: {e}")
+    
+    print(f"[CHATBOT] Total sources collected: {len(sources)}")
+    print(f"[CHATBOT] Total context blocks: {len(context_blocks)}")
 
     system_prompt = (
         "You are ICLeaF LMS's cloud-mode assistant. "
@@ -638,6 +620,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     )
     conversation_manager.add_conversation(conversation)
 
+    print(f"[CHATBOT] Returning response with {len(sources)} sources")
     return ChatResponse(
         answer=answer, 
         sources=sources, 

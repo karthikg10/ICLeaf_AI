@@ -42,7 +42,36 @@ content_client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else
 class RAGContextResult(NamedTuple):
     """Result from RAG context retrieval, containing the context string and metadata about documents used."""
     context: str
-    metadata: Dict[str, Any]  # Contains: documents_used (list of docIds/filenames), num_blocks, requested_docIds
+    metadata: Dict[str, Any]  # Contains: documents_used (list of docIds/filenames), num_blocks, requested_docIds, is_relevant, avg_similarity
+
+
+def validate_rag_context_for_internal_mode(rag_result: RAGContextResult, request: GenerateContentRequest) -> None:
+    """Validate that relevant context exists for internal mode content generation.
+    
+    Raises ValueError with descriptive error message if context is empty or irrelevant.
+    """
+    if request.mode != "internal":
+        return  # Only validate for internal mode
+    
+    rag_context = rag_result.context
+    rag_metadata = rag_result.metadata
+    
+    if not rag_context or not rag_metadata.get("is_relevant", False):
+        error_msg = (
+            f"No relevant information found in the specified documents for the topic '{request.prompt}'. "
+        )
+        if request.docIds and len(request.docIds) > 0:
+            error_msg += (
+                f"The requested document(s) do not contain relevant content about this topic. "
+                f"Please ensure the document(s) contain information related to '{request.prompt}' "
+                f"or try a different topic that matches the document content."
+            )
+        else:
+            error_msg += (
+                "No relevant documents found in your uploaded documents. "
+                "Please upload documents that contain information related to this topic."
+            )
+        raise ValueError(error_msg)
 
 
 def extract_openai_response(response):
@@ -182,14 +211,15 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
     
     try:
         # Query RAG store with the prompt
-        # Use -0.2 as min_similarity to be more permissive (same as /api/internal/search)
-        # This ensures we get results even when similarity scores are low
+        # Use 0.3 as min_similarity threshold to ensure relevance
+        # This prevents returning irrelevant chunks when topics don't match
         
         # If docIds are provided, we need to query for each docId separately
         # because rag.query() only supports filtering by a single doc_name
         all_hits = []
         requested_doc_ids = []
         documents_found = set()  # Track which documents were actually found and used
+        MIN_RELEVANCE_THRESHOLD = 0.3  # Minimum average similarity score to consider context relevant
         
         if request.docIds and len(request.docIds) > 0:
             # Filter by specific documents
@@ -209,7 +239,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                         doc_hits = rag.query(
                             request.prompt,
                             top_k=hits_per_doc,
-                            min_similarity=-0.2,
+                            min_similarity=MIN_RELEVANCE_THRESHOLD,
                             doc_id=doc_id
                         )
                     else:
@@ -217,7 +247,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                         doc_hits = rag.query(
                             request.prompt,
                             top_k=hits_per_doc,
-                            min_similarity=-0.2,
+                            min_similarity=MIN_RELEVANCE_THRESHOLD,
                             doc_name=doc_id
                         )
                     
@@ -231,43 +261,19 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                         all_hits.extend(doc_hits)
                         print(f"[CONTENT] Found {len(doc_hits)} chunks from docId '{doc_id}'")
                     else:
-                        print(f"[CONTENT] No chunks found for docId '{doc_id}'")
+                        print(f"[CONTENT] No relevant chunks found for docId '{doc_id}' (similarity threshold: {MIN_RELEVANCE_THRESHOLD})")
                 except Exception as e:
                     print(f"[CONTENT] Error querying docId '{doc_id}': {e}")
                     continue
             
-            # If no results from filtered query, try without filter as fallback
-            if not all_hits:
-                print(f"[CONTENT] No results with docIds filter, trying without filter as fallback")
-                all_hits = rag.query(
-                    request.prompt,
-                    top_k=top_k,
-                    min_similarity=-0.2
-                )
-                # Then manually filter by docIds
-                if all_hits:
-                    filtered_hits = []
-                    for hit in all_hits:
-                        meta = hit.get("meta", {})
-                        doc_id_in_meta = meta.get("docId", "")
-                        doc_name = meta.get("docName", meta.get("filename", ""))
-                        filename = meta.get("filename", "")
-                        # Check if this hit matches any of the requested docIds
-                        # Match by docId (UUID), docName, or filename
-                        if any(doc_id == doc_id_in_meta or doc_id in doc_name or doc_id in filename or doc_name == doc_id or filename == doc_id 
-                               for doc_id in doc_ids_set):
-                            filtered_hits.append(hit)
-                            # Track which documents were found
-                            doc_id_used = doc_id_in_meta or doc_name or filename
-                            if doc_id_used:
-                                documents_found.add(doc_id_used)
-                    all_hits = filtered_hits[:top_k]
+            # NO FALLBACK - if no results from specified documents, return empty
+            # This ensures we don't generate content from irrelevant or wrong documents
         else:
             # No docIds specified, query all documents
             all_hits = rag.query(
                 request.prompt,
                 top_k=top_k,
-                min_similarity=-0.2
+                min_similarity=MIN_RELEVANCE_THRESHOLD
             )
             # Track all documents found
             for hit in all_hits:
@@ -277,7 +283,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                     documents_found.add(doc_id_used)
         
         if not all_hits:
-            print(f"[CONTENT] Internal mode: No context retrieved from RAG query")
+            print(f"[CONTENT] Internal mode: No relevant context retrieved from RAG query")
             return RAGContextResult(
                 context="",
                 metadata={
@@ -285,7 +291,34 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                     "num_blocks": 0,
                     "requested_docIds": requested_doc_ids,
                     "internal_mode": True,
-                    "rag_used": False
+                    "rag_used": False,
+                    "is_relevant": False,
+                    "avg_similarity": 0.0
+                }
+            )
+        
+        # Calculate average similarity score to validate relevance
+        similarity_scores = [hit.get("score", 0.0) for hit in all_hits if hit.get("score") is not None]
+        avg_similarity = sum(similarity_scores) / len(similarity_scores) if similarity_scores else 0.0
+        min_similarity = min(similarity_scores) if similarity_scores else 0.0
+        
+        print(f"[CONTENT] Average similarity score: {avg_similarity:.3f}, Min: {min_similarity:.3f}")
+        
+        # Validate relevance: context must meet minimum average similarity threshold
+        is_relevant = avg_similarity >= MIN_RELEVANCE_THRESHOLD
+        
+        if not is_relevant:
+            print(f"[CONTENT] Context relevance check failed: avg_similarity {avg_similarity:.3f} < threshold {MIN_RELEVANCE_THRESHOLD}")
+            return RAGContextResult(
+                context="",
+                metadata={
+                    "documents_used": [],
+                    "num_blocks": 0,
+                    "requested_docIds": requested_doc_ids,
+                    "internal_mode": True,
+                    "rag_used": False,
+                    "is_relevant": False,
+                    "avg_similarity": avg_similarity
                 }
             )
         
@@ -321,6 +354,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                 break
         
         if not context_blocks:
+            print(f"[CONTENT] No valid context blocks extracted from hits")
             return RAGContextResult(
                 context="",
                 metadata={
@@ -328,7 +362,9 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                     "num_blocks": 0,
                     "requested_docIds": requested_doc_ids,
                     "internal_mode": True,
-                    "rag_used": False
+                    "rag_used": False,
+                    "is_relevant": False,
+                    "avg_similarity": avg_similarity
                 }
             )
         
@@ -339,7 +375,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
         
         context = "\n\n---\n\n".join(ctx_parts)
         doc_info = f" from {len(request.docIds)} specified documents" if request.docIds else ""
-        print(f"[CONTENT] Internal mode: Retrieved {len(context_blocks)} context blocks{doc_info} from uploaded documents")
+        print(f"[CONTENT] Internal mode: Retrieved {len(context_blocks)} relevant context blocks{doc_info} from uploaded documents")
         print(f"[CONTENT] Documents used: {list(documents_found)}")
         
         return RAGContextResult(
@@ -347,6 +383,8 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
             metadata={
                 "documents_used": list(documents_found),
                 "num_blocks": len(context_blocks),
+                "is_relevant": True,
+                "avg_similarity": avg_similarity,
                 "requested_docIds": requested_doc_ids,
                 "internal_mode": True,
                 "rag_used": True
@@ -416,6 +454,7 @@ async def generate_flashcard_content(request: GenerateContentRequest, config: Fl
     
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
     system_prompt = f"""You are an educational content generator. Create flashcards in a clean table format with the following specifications:
@@ -558,6 +597,7 @@ async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfi
 
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
 
     keys = [
@@ -718,6 +758,7 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
     
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
     columns = [
@@ -879,6 +920,7 @@ async def generate_video_content(request: GenerateContentRequest, config: VideoC
     
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
     # Generate the video script
@@ -944,6 +986,7 @@ async def generate_audio_content(request: GenerateContentRequest, config: AudioC
     
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
     # Generate the script content
@@ -1098,6 +1141,7 @@ async def generate_compiler_content(request: GenerateContentRequest, config: Com
     
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
     system_prompt = f"""You are a code generator. Create code with the following specifications:
@@ -1143,6 +1187,7 @@ async def generate_pdf_content(request: GenerateContentRequest, content_id: str,
     
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
     pdf_config = request.contentConfig.get('pdf', {})
@@ -1295,6 +1340,7 @@ async def generate_pdf_content_with_path(
     
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
     pdf_config = request.contentConfig.get('pdf', {})
@@ -1442,6 +1488,7 @@ async def generate_ppt_content(request: GenerateContentRequest, content_id: str,
     
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
     ppt_config = request.contentConfig.get('ppt', {})
@@ -1618,6 +1665,7 @@ async def generate_ppt_content_with_path(
     
     # Get RAG context for internal mode
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
+    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
     ppt_config = request.contentConfig.get('ppt', {})
