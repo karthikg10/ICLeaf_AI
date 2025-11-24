@@ -18,12 +18,15 @@ class Message(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str
 
+NonEmptyStr = constr(strip_whitespace=True, min_length=1)
+
+
 class ChatRequest(BaseModel):
     role: Role = "student"
     mode: Mode = "internal"
     message: constr(max_length=500)  # Enforce 500 char limit
-    sessionId: str
-    userId: str
+    sessionId: NonEmptyStr
+    userId: NonEmptyStr
     subjectId: Optional[str] = None
     topicId: Optional[str] = None
     docName: Optional[str] = None
@@ -93,8 +96,8 @@ class GenerateResponse(BaseModel):
 
 # ----- Session Management -----
 class ResetSessionRequest(BaseModel):
-    sessionId: str
-    userId: str
+    sessionId: NonEmptyStr
+    userId: NonEmptyStr
     subjectId: Optional[str] = None
     topicId: Optional[str] = None
     docName: Optional[str] = None

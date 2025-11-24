@@ -36,8 +36,8 @@ interface ChatPageProps {
 }
 
 export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
-  const [sessionId, setSessionId] = useState(() => `session_${Date.now()}`);
-  const [userId] = useState(() => `user_${Date.now()}`);
+  const [sessionId, setSessionId] = useState("");
+  const [userId, setUserId] = useState("");
   
   // Internal mode selectors
   const [subjectId, setSubjectId] = useState("");
@@ -51,16 +51,26 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [, setSources] = useState<Source[]>([]);
 
-  // Generate new session ID
-  const generateNewSession = () => {
-    const newSessionId = `session_${Date.now()}`;
-    setSessionId(newSessionId);
+  const requireIdentifiers = () => {
+    if (!userId.trim() || !sessionId.trim()) {
+      alert("Please enter both a user ID and session ID before chatting.");
+      return false;
+    }
+    return true;
+  };
+
+  const clearSessionState = () => {
+    setSessionId("");
     setMessages([]);
     setSources([]);
   };
 
   // Reset session
   const resetSession = async () => {
+    if (!requireIdentifiers()) {
+      return;
+    }
+
     try {
       const response = await fetch(`${apiUrl}/api/chatbot/reset-session`, {
         method: "POST",
@@ -87,6 +97,7 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
   // Send chat message
   const sendChat = async () => {
     if (!input.trim() || busy) return;
+    if (!requireIdentifiers()) return;
     
     const userMessage = input.trim();
     setMessages(prev => [...prev, { 
@@ -174,33 +185,51 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
         borderRadius: 8,
         border: "1px solid #e9ecef"
       }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <label style={{ fontSize: 14, fontWeight: 600 }}>Session:</label>
-          <code style={{ 
-            background: "#e9ecef", 
-            padding: "4px 8px", 
-            borderRadius: 4,
-            fontSize: 12 
-          }}>
-            {sessionId}
-          </code>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1 }}>
+          <label style={{ fontSize: 14, fontWeight: 600 }}>User ID</label>
+          <input
+            value={userId}
+            onChange={(e) => setUserId(e.target.value)}
+            placeholder="Enter user ID"
+            style={{
+              padding: "6px 8px",
+              borderRadius: 4,
+              border: "1px solid #ced4da",
+              minWidth: 200,
+            }}
+          />
         </div>
-        
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1 }}>
+          <label style={{ fontSize: 14, fontWeight: 600 }}>Session ID</label>
+          <input
+            value={sessionId}
+            onChange={(e) => setSessionId(e.target.value)}
+            placeholder="Enter session ID"
+            style={{
+              padding: "6px 8px",
+              borderRadius: 4,
+              border: "1px solid #ced4da",
+              minWidth: 200,
+            }}
+          />
+        </div>
+
         <button
-          onClick={generateNewSession}
+          onClick={clearSessionState}
           style={{
             padding: "6px 12px",
-            background: "#007bff",
-            color: "white",
+            background: "#ffc107",
+            color: "#212529",
             border: "none",
             borderRadius: 4,
             cursor: "pointer",
             fontSize: 12,
           }}
         >
-          New Session
+          Clear Session ID
         </button>
-        
+
         <button
           onClick={resetSession}
           style={{
