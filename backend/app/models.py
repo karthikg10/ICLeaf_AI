@@ -45,6 +45,19 @@ class ChatRequest(BaseModel):
             if v == "cloud":
                 v = "external"
         return v
+    
+    # Validate optional fields - if provided, they must be non-empty
+    @field_validator("subjectId", "topicId", "docName", "subjectName", "topicName", mode="before")
+    @classmethod
+    def _validate_optional_fields(cls, v):
+        if v is not None:
+            if isinstance(v, str):
+                v = v.strip()
+                if not v:  # Empty string after strip
+                    return None  # Convert empty string to None
+            elif not isinstance(v, str):
+                raise ValueError(f"Expected string, got {type(v).__name__}")
+        return v
 
 class Source(BaseModel):
     title: str

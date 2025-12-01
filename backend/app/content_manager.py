@@ -1842,16 +1842,25 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         except ValueError as e:
             raise Exception(f"Invalid file path: {str(e)}")
     
-    # Get RAG metadata for internal mode (to track which documents were used)
-    rag_metadata = {}
+    # Get RAG metadata for internal mode only (to track which documents were used)
+    # For external mode, don't include rag_metadata to avoid displaying "RAG not used"
+    metadata_dict = {
+        "docIds": request.docIds,
+        "subjectName": request.subjectName,
+        "topicName": request.topicName,
+        "customFileName": request.customFileName,
+        "customFilePath": request.customFilePath,
+    }
+    
     if request.mode == "internal":
         try:
             rag_result = get_rag_context_for_internal_mode(request, top_k=5)
             rag_metadata = rag_result.metadata
             print(f"[CONTENT] RAG metadata: {rag_metadata}")
+            metadata_dict["rag_metadata"] = rag_metadata  # Only include for internal mode
         except Exception as e:
             print(f"[CONTENT] Error getting RAG metadata: {e}")
-            rag_metadata = {"error": str(e), "rag_used": False}
+            metadata_dict["rag_metadata"] = {"error": str(e), "rag_used": False}
     
     # Create content object
     content = GeneratedContent(
@@ -1863,14 +1872,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         prompt=request.prompt,
         status="pending",
         contentConfig=request.contentConfig,
-        metadata={
-            "docIds": request.docIds,
-            "subjectName": request.subjectName,
-            "topicName": request.topicName,
-            "customFileName": request.customFileName,
-            "customFilePath": request.customFilePath,
-            "rag_metadata": rag_metadata  # Add RAG metadata to track document usage
-        }
+        metadata=metadata_dict
     )
     
     store_content(content)
