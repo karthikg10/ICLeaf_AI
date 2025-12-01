@@ -4,7 +4,22 @@ from datetime import datetime
 from .models import SessionMessage
 
 # In-memory session storage (in production, use Redis or database)
-_sessions: Dict[str, List[SessionMessage]] = {}
+_sessions: Dict[str, List[SessionMessage]] = {}  # sessionId -> messages
+_user_sessions: Dict[str, str] = {}  # userId -> sessionId (one session per user)
+
+def ensure_user_session_mapping(user_id: str, session_id: str) -> None:
+    """Ensure a user is mapped to a session ID.
+    If the user already has a different session, log a warning but accept the provided sessionId.
+    This allows clients to manage their own sessionIds while maintaining consistency."""
+    if user_id in _user_sessions:
+        existing_session = _user_sessions[user_id]
+        if existing_session != session_id:
+            print(f"[SESSION] User '{user_id}' previously used session '{existing_session}', now using '{session_id}'. Updating mapping.")
+    # Update the mapping to the provided sessionId
+    _user_sessions[user_id] = session_id
+    # Ensure the session exists in _sessions
+    if session_id not in _sessions:
+        _sessions[session_id] = []
 
 def append_history(sessionId: str, msg: SessionMessage) -> None:
     """Append a message to a session's history."""

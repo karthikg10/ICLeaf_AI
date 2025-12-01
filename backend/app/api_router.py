@@ -197,7 +197,11 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     sources: List[Source] = []
     context_blocks: List[str] = []
 
-    # Store the user message in session history
+    # Accept the provided sessionId and userId (already validated as NonEmptyStr in ChatRequest)
+    # Ensure the userId has a mapping to this sessionId for consistency
+    session_manager.ensure_user_session_mapping(req.userId, req.sessionId)
+    
+    # Store the user message in session history using the provided sessionId
     user_msg = SessionMessage(
         role="user",
         content=req.message,
@@ -557,6 +561,10 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     messages: List[dict] = [{"role": "system", "content": system_prompt}]
     if ctx:
         messages.append({"role": "system", "content": f"Context for grounding:\n{ctx}"})
+    
+    # Accept the provided sessionId and userId (already validated as NonEmptyStr in ChatRequest)
+    # Ensure the userId has a mapping to this sessionId for consistency
+    session_manager.ensure_user_session_mapping(req.userId, req.sessionId)
     
     # Add session history
     for m in session_manager.get_history(req.sessionId, last=10):
