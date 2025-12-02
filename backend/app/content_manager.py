@@ -219,7 +219,8 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
         all_hits = []
         requested_doc_ids = []
         documents_found = set()  # Track which documents were actually found and used
-        MIN_RELEVANCE_THRESHOLD = 0.3  # Minimum average similarity score to consider context relevant
+        MIN_RELEVANCE_THRESHOLD = 0.2  # Minimum average similarity score to consider context relevant
+        QUERY_MIN_SIMILARITY = 0.1  # Lower threshold for initial query to get results, then validate average
         
         if request.docIds and len(request.docIds) > 0:
             # Filter by specific documents
@@ -235,11 +236,12 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                     doc_hits = []
                     # First try filtering by docId (UUID) if it looks like a UUID
                     # Otherwise try by doc_name/filename (legacy support)
+                    # Use lower threshold for query to get results, then validate average similarity
                     if len(doc_id) == 36 and doc_id.count('-') == 4:  # UUID format
                         doc_hits = rag.query(
                             request.prompt,
                             top_k=hits_per_doc,
-                            min_similarity=MIN_RELEVANCE_THRESHOLD,
+                            min_similarity=QUERY_MIN_SIMILARITY,  # Lower threshold to get results
                             doc_id=doc_id
                         )
                     else:
@@ -247,7 +249,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                         doc_hits = rag.query(
                             request.prompt,
                             top_k=hits_per_doc,
-                            min_similarity=MIN_RELEVANCE_THRESHOLD,
+                            min_similarity=QUERY_MIN_SIMILARITY,  # Lower threshold to get results
                             doc_name=doc_id
                         )
                     
@@ -261,7 +263,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                         all_hits.extend(doc_hits)
                         print(f"[CONTENT] Found {len(doc_hits)} chunks from docId '{doc_id}'")
                     else:
-                        print(f"[CONTENT] No relevant chunks found for docId '{doc_id}' (similarity threshold: {MIN_RELEVANCE_THRESHOLD})")
+                        print(f"[CONTENT] No relevant chunks found for docId '{doc_id}' (query similarity threshold: {QUERY_MIN_SIMILARITY})")
                 except Exception as e:
                     print(f"[CONTENT] Error querying docId '{doc_id}': {e}")
                     continue
@@ -273,7 +275,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
             all_hits = rag.query(
                 request.prompt,
                 top_k=top_k,
-                min_similarity=MIN_RELEVANCE_THRESHOLD
+                min_similarity=QUERY_MIN_SIMILARITY  # Lower threshold to get results, then validate average
             )
             # Track all documents found
             for hit in all_hits:
