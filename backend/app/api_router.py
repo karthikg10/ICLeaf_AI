@@ -219,9 +219,27 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         topic_id_filter = req.topicId if req.topicId else None
         doc_name_filter = req.docName if req.docName else None
 
+        # Query-length aware settings
+        query_tokens = len(req.message.split())
+        has_specific_doc = bool(req.docIds and len(req.docIds) > 0)
+        
+        # Base similarity thresholds (used only when NO specific docId)
+        if query_tokens <= 3:
+            MIN_RELEVANCE_THRESHOLD = 0.15
+            MAX_SIM_THRESHOLD = 0.25
+        else:
+            MIN_RELEVANCE_THRESHOLD = 0.20
+            MAX_SIM_THRESHOLD = 0.30
+        
+        # Retrieval thresholds
+        QUERY_MIN_SIMILARITY = 0.1
+        DOC_ID_QUERY_MIN_SIMILARITY = -0.2 if has_specific_doc else QUERY_MIN_SIMILARITY
+        
+        print(f"[CHATBOT] Query length: {query_tokens} tokens, Specific doc: {has_specific_doc}, Thresholds: avg>={MIN_RELEVANCE_THRESHOLD}, max>={MAX_SIM_THRESHOLD}")
+        
         # Handle docIds filtering (similar to content generation)
         hits = []
-        if req.docIds and len(req.docIds) > 0:
+        if has_specific_doc:
             # Filter by specific documents
             doc_ids_set = set(doc_id.strip() for doc_id in req.docIds if doc_id and doc_id.strip())
             print(f"[CHATBOT] Internal mode: Filtering by docIds: {list(doc_ids_set)}")
@@ -232,13 +250,12 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
             
             for doc_id in doc_ids_set:
                 try:
-                    # First try filtering by docId (UUID) if it looks like a UUID
-                    # Otherwise try by doc_name/filename (legacy support)
+                    # UUID-style docId vs legacy filename
                     if len(doc_id) == 36 and doc_id.count('-') == 4:  # UUID format
                         doc_hits = rag.query(
                             req.message,
                             top_k=hits_per_doc,
-                            min_similarity=0.1,
+                            min_similarity=DOC_ID_QUERY_MIN_SIMILARITY,  # VERY permissive
                             subject_id=subject_id_filter,
                             topic_id=topic_id_filter,
                             doc_id=doc_id
@@ -248,7 +265,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                         doc_hits = rag.query(
                             req.message,
                             top_k=hits_per_doc,
-                            min_similarity=0.1,
+                            min_similarity=DOC_ID_QUERY_MIN_SIMILARITY,  # VERY permissive
                             subject_id=subject_id_filter,
                             topic_id=topic_id_filter,
                             doc_name=doc_id
@@ -265,11 +282,11 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
             
             hits = all_hits
         else:
-            # No docIds specified, use regular query with other filters
+            # No docIds specified, normal query
             hits = rag.query(
                 req.message,
                 top_k=min(req.top_k, 5),
-                min_similarity=0.1,
+                min_similarity=QUERY_MIN_SIMILARITY,
                 subject_id=subject_id_filter,
                 topic_id=topic_id_filter,
                 doc_name=doc_name_filter
@@ -278,19 +295,31 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         print(f"[CHATBOT] Internal mode query: '{req.message[:50]}...'")
         print(f"[CHATBOT] Found {len(hits)} RAG hits")
 
-        # Calculate average similarity score to validate relevance
-        MIN_RELEVANCE_THRESHOLD = 0.2  # Minimum average similarity score to consider context relevant
-        similarity_scores = [hit.get("score", 0.0) for hit in hits if hit.get("score") is not None]
+        # Use top-k hits for relevance stats (top 3-5) to avoid weak trailing chunks dragging down average
+        TOP_K_FOR_STATS = min(5, len(hits))
+        top_hits = sorted(hits, key=lambda x: x.get("score", 0.0), reverse=True)[:TOP_K_FOR_STATS]
+        similarity_scores = [hit.get("score", 0.0) for hit in top_hits if hit.get("score") is not None]
+        
         avg_similarity = sum(similarity_scores) / len(similarity_scores) if similarity_scores else 0.0
         min_similarity = min(similarity_scores) if similarity_scores else 0.0
+        max_similarity = max(similarity_scores) if similarity_scores else 0.0
         
-        print(f"[CHATBOT] Average similarity score: {avg_similarity:.3f}, Min: {min_similarity:.3f}")
+        print(f"[CHATBOT] Top-{TOP_K_FOR_STATS} stats - Average: {avg_similarity:.3f}, Min: {min_similarity:.3f}, Max: {max_similarity:.3f}")
         
-        # Validate relevance: only proceed if average similarity meets threshold
-        is_relevant = avg_similarity >= MIN_RELEVANCE_THRESHOLD
+        # Relevance check:
+        # 1) If user selected a specific docId and we got ANY hits, trust the user and accept them.
+        # 2) Otherwise, use thresholds based on avg / max similarity.
+        if has_specific_doc and len(hits) > 0:
+            print(f"[CHATBOT] Specific docId selected with {len(hits)} hits - skipping similarity threshold validation")
+            is_relevant = True
+        else:
+            is_relevant = (
+                (similarity_scores and avg_similarity >= MIN_RELEVANCE_THRESHOLD)
+                or (similarity_scores and max_similarity >= MAX_SIM_THRESHOLD)
+            )
         
         if not is_relevant:
-            print(f"[CHATBOT] Context relevance check failed: avg_similarity {avg_similarity:.3f} < threshold {MIN_RELEVANCE_THRESHOLD}")
+            print(f"[CHATBOT] Context relevance check failed: avg_similarity {avg_similarity:.3f} < {MIN_RELEVANCE_THRESHOLD} AND max_similarity {max_similarity:.3f} < {MAX_SIM_THRESHOLD}")
             # Return "information not found" response without sources
             answer = "I couldn't find relevant information about this topic in the provided documents. Please try rephrasing your question or check if the topic is covered in the documents."
             assistant_msg = SessionMessage(
