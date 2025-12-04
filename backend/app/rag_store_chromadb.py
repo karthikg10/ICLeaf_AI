@@ -208,19 +208,27 @@ class ChromaRAGStore:
                     continue
 
                 # Chroma returns a distance (cosine by default). Convert to similarity.
-                similarity = max(0.0, 1.0 - distance)
+                # Don't clamp to 0.0 - store actual similarity value (can be negative for very dissimilar vectors)
+                # This ensures we always have a real score for validation
+                similarity = 1.0 - distance
                 if similarity >= min_similarity:
                     hits.append({
                         "id": _id,
                         "text": doc,
-                        "score": round(similarity, 6),
+                        "score": round(similarity, 6),  # Store actual similarity, even if negative
                         "meta": meta or {},
                     })
 
             # Highest similarity first
             hits.sort(key=lambda x: x["score"], reverse=True)
-
-            logger.info(f"[RAG] Query: '{query_text[:50]}...' -> {len(hits)} results (min_sim={min_similarity})")
+            
+            # Debug: Log score range for troubleshooting
+            if hits:
+                scores = [h["score"] for h in hits]
+                logger.info(f"[RAG] Query: '{query_text[:50]}...' -> {len(hits)} results (min_sim={min_similarity}, score_range=[{min(scores):.3f}, {max(scores):.3f}])")
+            else:
+                logger.info(f"[RAG] Query: '{query_text[:50]}...' -> {len(hits)} results (min_sim={min_similarity})")
+            
             return hits
 
         except Exception as e:

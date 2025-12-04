@@ -1537,6 +1537,35 @@ async def generate_content(request: GenerateContentRequest = Body(...)):
 
 async def _process_content_generation(request: GenerateContentRequest, start_time: float) -> GenerateContentResponse:
     try:
+        # Validate required fields for PDF generation
+        if request.contentType == "pdf" and request.mode == "internal":
+            if not request.subjectName or not request.subjectName.strip():
+                return GenerateContentResponse(
+                    success=False,
+                    contentId="",
+                    userId=request.userId,
+                    status="failed",
+                    message="Subject Name is required for PDF generation in internal mode",
+                    estimated_completion_time=None,
+                    filePath=None,
+                    fileName=None,
+                    storageDirectory=None,
+                    metadata=None
+                )
+            if not request.topicName or not request.topicName.strip():
+                return GenerateContentResponse(
+                    success=False,
+                    contentId="",
+                    userId=request.userId,
+                    status="failed",
+                    message="Topic Name is required for PDF generation in internal mode",
+                    estimated_completion_time=None,
+                    filePath=None,
+                    fileName=None,
+                    storageDirectory=None,
+                    metadata=None
+                )
+        
         # Validate content type and config
         if request.contentType == "flashcard" and not request.contentConfig.get('flashcard'):
             return GenerateContentResponse(

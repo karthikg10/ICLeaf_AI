@@ -135,6 +135,18 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
       return;
     }
 
+    // Validate required fields for PDF generation
+    if (contentType === "pdf" && mode === "internal") {
+      if (!subjectName.trim()) {
+        alert("Please enter a Subject Name for PDF generation");
+        return;
+      }
+      if (!topicName.trim()) {
+        alert("Please enter a Topic Name for PDF generation");
+        return;
+      }
+    }
+
     setGenerating(true);
     setGenerationResult(null);
 
@@ -189,6 +201,9 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
         } else {
           requestBody.docIds = [];
         }
+        // Add subject and topic for internal mode (especially for PDF generation)
+        if (subjectName) requestBody.subjectName = subjectName;
+        if (topicName) requestBody.topicName = topicName;
       } else {
         // For external mode
         if (subjectName) requestBody.subjectName = subjectName;
@@ -487,28 +502,70 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
             )}
 
             {mode === "internal" && (
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-                  Document IDs (docIds) - Optional
-                </label>
-                <input
-                  type="text"
-                  value={docIds}
-                  onChange={(e) => setDocIds(e.target.value)}
-                  placeholder="Enter comma-separated docIds (e.g., doc-id-1, doc-id-2) or leave empty to use all documents"
-                  style={{
-                    width: "100%",
-                    padding: 8,
-                    border: "1px solid #ccc",
-                    borderRadius: 4,
-                    fontSize: 14,
-                    fontFamily: "monospace",
-                  }}
-                />
-                <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-                  💡 Tip: Get docIds from the Upload page after uploading files. Enter multiple docIds separated by commas to generate content from specific documents only.
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+                  <div>
+                    <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                      Subject Name {contentType === "pdf" && <span style={{ color: "#dc3545" }}>*</span>}
+                    </label>
+                    <input
+                      type="text"
+                      value={subjectName}
+                      onChange={(e) => setSubjectName(e.target.value)}
+                      placeholder="e.g., Data Structures"
+                      required={contentType === "pdf"}
+                      style={{
+                        width: "100%",
+                        padding: 8,
+                        border: "1px solid #ccc",
+                        borderRadius: 4,
+                        fontSize: 14,
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                      Topic Name {contentType === "pdf" && <span style={{ color: "#dc3545" }}>*</span>}
+                    </label>
+                    <input
+                      type="text"
+                      value={topicName}
+                      onChange={(e) => setTopicName(e.target.value)}
+                      placeholder="e.g., Stacks and Queues"
+                      required={contentType === "pdf"}
+                      style={{
+                        width: "100%",
+                        padding: 8,
+                        border: "1px solid #ccc",
+                        borderRadius: 4,
+                        fontSize: 14,
+                      }}
+                    />
+                  </div>
                 </div>
-              </div>
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                    Document IDs (docIds) - Optional
+                  </label>
+                  <input
+                    type="text"
+                    value={docIds}
+                    onChange={(e) => setDocIds(e.target.value)}
+                    placeholder="Enter comma-separated docIds (e.g., doc-id-1, doc-id-2) or leave empty to use all documents"
+                    style={{
+                      width: "100%",
+                      padding: 8,
+                      border: "1px solid #ccc",
+                      borderRadius: 4,
+                      fontSize: 14,
+                      fontFamily: "monospace",
+                    }}
+                  />
+                  <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+                    💡 Tip: Get docIds from the Upload page after uploading files. Enter multiple docIds separated by commas to generate content from specific documents only.
+                  </div>
+                </div>
+              </>
             )}
           </div>
 

@@ -219,8 +219,35 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
         all_hits = []
         requested_doc_ids = []
         documents_found = set()  # Track which documents were actually found and used
-        MIN_RELEVANCE_THRESHOLD = 0.2  # Minimum average similarity score to consider context relevant
         QUERY_MIN_SIMILARITY = 0.1  # Lower threshold for initial query to get results, then validate average
+        
+        # Query-length aware thresholds
+        query_tokens = len(request.prompt.split())
+        has_specific_doc = request.docIds and len(request.docIds) > 0
+        
+        # When filtering by specific docId, use very permissive threshold to get all chunks from that doc
+        # Then validate similarity afterward - this ensures we get results even if individual similarities are low
+        DOC_ID_QUERY_MIN_SIMILARITY = -0.2 if has_specific_doc else QUERY_MIN_SIMILARITY
+        
+        # Set thresholds based on query length and whether specific doc is selected
+        if query_tokens <= 3:
+            # Short query: more lenient thresholds
+            MIN_RELEVANCE_THRESHOLD = 0.15
+            MAX_SIM_THRESHOLD = 0.25
+            # If specific doc is selected, be even more lenient
+            if has_specific_doc:
+                MIN_RELEVANCE_THRESHOLD = 0.12
+                MAX_SIM_THRESHOLD = 0.22
+        else:
+            # Longer query: stricter thresholds
+            MIN_RELEVANCE_THRESHOLD = 0.2
+            MAX_SIM_THRESHOLD = 0.3
+            # If specific doc is selected, slightly more lenient
+            if has_specific_doc:
+                MIN_RELEVANCE_THRESHOLD = 0.18
+                MAX_SIM_THRESHOLD = 0.28
+        
+        print(f"[CONTENT] Query length: {query_tokens} tokens, Specific doc: {has_specific_doc}, Thresholds: avg>={MIN_RELEVANCE_THRESHOLD}, max>={MAX_SIM_THRESHOLD}")
         
         if request.docIds and len(request.docIds) > 0:
             # Filter by specific documents
@@ -236,12 +263,13 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                     doc_hits = []
                     # First try filtering by docId (UUID) if it looks like a UUID
                     # Otherwise try by doc_name/filename (legacy support)
-                    # Use lower threshold for query to get results, then validate average similarity
+                    # Use very permissive threshold when filtering by specific docId to ensure we get results
+                    # Then validate similarity afterward
                     if len(doc_id) == 36 and doc_id.count('-') == 4:  # UUID format
                         doc_hits = rag.query(
                             request.prompt,
                             top_k=hits_per_doc,
-                            min_similarity=QUERY_MIN_SIMILARITY,  # Lower threshold to get results
+                            min_similarity=DOC_ID_QUERY_MIN_SIMILARITY,  # Very permissive when docId specified
                             doc_id=doc_id
                         )
                     else:
@@ -249,7 +277,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                         doc_hits = rag.query(
                             request.prompt,
                             top_k=hits_per_doc,
-                            min_similarity=QUERY_MIN_SIMILARITY,  # Lower threshold to get results
+                            min_similarity=DOC_ID_QUERY_MIN_SIMILARITY,  # Very permissive when docId specified
                             doc_name=doc_id
                         )
                     
@@ -263,7 +291,7 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                         all_hits.extend(doc_hits)
                         print(f"[CONTENT] Found {len(doc_hits)} chunks from docId '{doc_id}'")
                     else:
-                        print(f"[CONTENT] No relevant chunks found for docId '{doc_id}' (query similarity threshold: {QUERY_MIN_SIMILARITY})")
+                        print(f"[CONTENT] No relevant chunks found for docId '{doc_id}' (query similarity threshold: {DOC_ID_QUERY_MIN_SIMILARITY})")
                 except Exception as e:
                     print(f"[CONTENT] Error querying docId '{doc_id}': {e}")
                     continue
@@ -299,18 +327,30 @@ def get_rag_context_for_internal_mode(request: GenerateContentRequest, top_k: in
                 }
             )
         
-        # Calculate average similarity score to validate relevance
-        similarity_scores = [hit.get("score", 0.0) for hit in all_hits if hit.get("score") is not None]
+        # Use top-k hits for relevance stats (top 3-5) to avoid weak trailing chunks dragging down average
+        TOP_K_FOR_STATS = min(5, len(all_hits))
+        top_hits = sorted(all_hits, key=lambda x: x.get("score", 0.0), reverse=True)[:TOP_K_FOR_STATS]
+        similarity_scores = [hit.get("score", 0.0) for hit in top_hits if hit.get("score") is not None]
+        
         avg_similarity = sum(similarity_scores) / len(similarity_scores) if similarity_scores else 0.0
         min_similarity = min(similarity_scores) if similarity_scores else 0.0
+        max_similarity = max(similarity_scores) if similarity_scores else 0.0
         
-        print(f"[CONTENT] Average similarity score: {avg_similarity:.3f}, Min: {min_similarity:.3f}")
+        print(f"[CONTENT] Top-{TOP_K_FOR_STATS} stats - Average: {avg_similarity:.3f}, Min: {min_similarity:.3f}, Max: {max_similarity:.3f}")
         
-        # Validate relevance: context must meet minimum average similarity threshold
-        is_relevant = avg_similarity >= MIN_RELEVANCE_THRESHOLD
+        # Validate relevance: 
+        # If specific docId is selected and we got hits, skip threshold check (user explicitly selected this doc)
+        # Otherwise, accept if average meets threshold OR if max similarity is high
+        if has_specific_doc and len(all_hits) > 0:
+            is_relevant = True
+            print(f"[CONTENT] Specific docId selected with {len(all_hits)} hits - skipping similarity threshold validation")
+        else:
+            # Validate relevance: accept if average meets threshold OR if max similarity is high (at least one highly relevant chunk)
+            # This helps with short queries where average might be lower but top chunks are still relevant
+            is_relevant = avg_similarity >= MIN_RELEVANCE_THRESHOLD or max_similarity >= MAX_SIM_THRESHOLD
         
         if not is_relevant:
-            print(f"[CONTENT] Context relevance check failed: avg_similarity {avg_similarity:.3f} < threshold {MIN_RELEVANCE_THRESHOLD}")
+            print(f"[CONTENT] Context relevance check failed: avg_similarity {avg_similarity:.3f} < {MIN_RELEVANCE_THRESHOLD} AND max_similarity {max_similarity:.3f} < {MAX_SIM_THRESHOLD}")
             return RAGContextResult(
                 context="",
                 metadata={
@@ -1312,6 +1352,24 @@ START WRITING NOW - aim for {total_words_needed} words:"""
         alignment=4
     )
     
+    metadata_style = ParagraphStyle(
+        'CustomMetadata',
+        parent=styles['Normal'],
+        fontSize=11,
+        leading=14,
+        spaceAfter=8,
+        alignment=0,
+        fontName='Helvetica'
+    )
+    
+    # Add subject and topic fields if available
+    if request.subjectName or request.topicName:
+        if request.subjectName:
+            story.append(Paragraph(f"<b>Subject:</b> {request.subjectName}", metadata_style))
+        if request.topicName:
+            story.append(Paragraph(f"<b>Topic:</b> {request.topicName}", metadata_style))
+        story.append(Spacer(1, 0.15 * inch))
+    
     paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
     
     for para in paragraphs:
@@ -1464,6 +1522,24 @@ START WRITING NOW - aim for {total_words_needed} words:"""
         spaceAfter=12,
         alignment=4
     )
+    
+    metadata_style = ParagraphStyle(
+        'CustomMetadata',
+        parent=styles['Normal'],
+        fontSize=11,
+        leading=14,
+        spaceAfter=8,
+        alignment=0,
+        fontName='Helvetica'
+    )
+    
+    # Add subject and topic fields if available
+    if request.subjectName or request.topicName:
+        if request.subjectName:
+            story.append(Paragraph(f"<b>Subject:</b> {request.subjectName}", metadata_style))
+        if request.topicName:
+            story.append(Paragraph(f"<b>Topic:</b> {request.topicName}", metadata_style))
+        story.append(Spacer(1, 0.15 * inch))
     
     paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
     
