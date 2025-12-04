@@ -1,5 +1,0 @@
-S.No.,QUESTION,CORRECT ANSWER,ANSWER DESC,ANSWER 1,ANSWER 2,ANSWER 3,ANSWER 4
-1,What is the primary purpose of a stack data structure?,1,A stack follows the Last In First Out (LIFO) principle.,To store data in LIFO order,To store data in FIFO order,To allow random access to elements,To maintain a sorted list of elements
-2,Which data structure uses nodes and pointers?,3,Linked lists consist of nodes that point to the next node.,Array,Stack,Linked List,Hash Table
-3,What is the time complexity of accessing an element in an array?,1,Arrays provide O(1) time complexity for element access.,O(1),O(n),O(log n),O(n^2)
-4,Which data structure is best for implementing a priority queue?,2,Heaps are commonly used to implement priority queues efficiently.,Array,Heap,Linked List,Stack

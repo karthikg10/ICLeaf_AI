@@ -159,11 +159,12 @@ def generate_content_id() -> str:
     return str(uuid.uuid4())
 
 def clean_markdown_formatting(text: str) -> str:
-    """Remove ALL markdown formatting from text - clean plain text only."""
+    """Remove markdown formatting from text, but preserve **bold** for headings."""
     
-    # Remove ** and __ (bold)
-    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    # Keep **bold** formatting (for headings/subheadings) - don't remove it
+    # Remove __ (alternative bold syntax)
     text = re.sub(r'__(.*?)__', r'\1', text)
+    text = text.replace('__', '')
     
     # Remove * and _ (italic) - but be careful with contractions
     text = re.sub(r'([^a-zA-Z0-9])\*(.*?)\*([^a-zA-Z0-9])', r'\1\2\3', text)

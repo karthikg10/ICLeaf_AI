@@ -1,0 +1,5 @@
+subject,topic,type,answer description,levels,total options,Choice Answer One,Choice Answer Two,Choice Answer Three,Choice Answer Four,Choice Answer Five,correct answers,TAG1,TAG2
+Java,Data Structures,Choice,HashMap allows for fast retrieval of data.,Medium,4,It maintains the order of elements.,It allows duplicate keys.,It provides fast retrieval of data.,It is synchronized.,,3,Java,Data Structures
+Java,Data Structures,Choice,A stack follows the LIFO principle.,Medium,4,Queue,Stack,ArrayList,LinkedList,,2,Java,Data Structures
+Java,Data Structures,FillUp,A List allows duplicate elements.,Medium,,,,,,,List,Java,Data Structures
+Java,Data Structures,Match,Match each data structure to its characteristic.,Medium,4,a=Dynamic array,b=Node-based structure,c=No duplicates,d=Sorted key-value pairs,,"a=1,b=2,c=3,d=4",Java,Data Structures

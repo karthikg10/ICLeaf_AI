@@ -164,9 +164,13 @@ class ChromaRAGStore:
 
         try:
             from . import embedding_service
+            from . import query_expansion
 
-            # 1) Make the query embedding
-            query_embedding = embedding_service.embed_text(query_text)
+            # 0) Expand abbreviations in query to improve matching with full forms
+            expanded_query = query_expansion.expand_query(query_text)
+            
+            # 1) Make the query embedding using expanded query
+            query_embedding = embedding_service.embed_text(expanded_query)
             if not query_embedding:
                 logger.error("[RAG] Failed to generate query embedding")
                 return []
@@ -225,9 +229,15 @@ class ChromaRAGStore:
             # Debug: Log score range for troubleshooting
             if hits:
                 scores = [h["score"] for h in hits]
-                logger.info(f"[RAG] Query: '{query_text[:50]}...' -> {len(hits)} results (min_sim={min_similarity}, score_range=[{min(scores):.3f}, {max(scores):.3f}])")
+                if expanded_query != query_text:
+                    logger.info(f"[RAG] Query: '{query_text[:50]}...' (expanded: '{expanded_query[:80]}...') -> {len(hits)} results (min_sim={min_similarity}, score_range=[{min(scores):.3f}, {max(scores):.3f}])")
+                else:
+                    logger.info(f"[RAG] Query: '{query_text[:50]}...' -> {len(hits)} results (min_sim={min_similarity}, score_range=[{min(scores):.3f}, {max(scores):.3f}])")
             else:
-                logger.info(f"[RAG] Query: '{query_text[:50]}...' -> {len(hits)} results (min_sim={min_similarity})")
+                if expanded_query != query_text:
+                    logger.info(f"[RAG] Query: '{query_text[:50]}...' (expanded: '{expanded_query[:80]}...') -> {len(hits)} results (min_sim={min_similarity})")
+                else:
+                    logger.info(f"[RAG] Query: '{query_text[:50]}...' -> {len(hits)} results (min_sim={min_similarity})")
             
             return hits
 

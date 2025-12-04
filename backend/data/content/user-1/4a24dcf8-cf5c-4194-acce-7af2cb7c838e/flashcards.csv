@@ -1,9 +1,0 @@
-KEY,Description
-Array,"A collection of elements identified by index or key, allowing easy access to each item."
-Linked List,"A linear data structure where each element is a separate object, linked using pointers."
-Stack,A collection of elements that follows the Last In First Out (LIFO) principle.
-Queue,A collection of elements that follows the First In First Out (FIFO) principle.
-Hash Table,A data structure that stores key-value pairs for efficient data retrieval based on keys.
-Tree,"A hierarchical data structure consisting of nodes, where each node has a value and links to child nodes."
-Graph,"A collection of nodes (vertices) connected by edges, used to represent relationships or connections."
-Set,"An unordered collection of unique elements, often used to perform mathematical set operations."

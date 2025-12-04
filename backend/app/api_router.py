@@ -224,19 +224,25 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         has_specific_doc = bool(req.docIds and len(req.docIds) > 0)
         
         # Base similarity thresholds (used only when NO specific docId)
+        # More lenient thresholds for shorter queries, gradually stricter for longer ones
         if query_tokens <= 3:
             MIN_RELEVANCE_THRESHOLD = 0.15
             MAX_SIM_THRESHOLD = 0.25
+        elif query_tokens <= 8:
+            # Medium-length queries: more lenient thresholds
+            MIN_RELEVANCE_THRESHOLD = 0.16  # Lower from 0.18
+            MAX_SIM_THRESHOLD = 0.26        # Lower from 0.28
         else:
-            MIN_RELEVANCE_THRESHOLD = 0.20
-            MAX_SIM_THRESHOLD = 0.30
+            # Longer queries: stricter thresholds
+            MIN_RELEVANCE_THRESHOLD = 0.18
+            MAX_SIM_THRESHOLD = 0.28
         
         # Retrieval thresholds
-        QUERY_MIN_SIMILARITY = 0.1
+        QUERY_MIN_SIMILARITY = -0.2
         DOC_ID_QUERY_MIN_SIMILARITY = -0.2 if has_specific_doc else QUERY_MIN_SIMILARITY
         
         print(f"[CHATBOT] Query length: {query_tokens} tokens, Specific doc: {has_specific_doc}, Thresholds: avg>={MIN_RELEVANCE_THRESHOLD}, max>={MAX_SIM_THRESHOLD}")
-        
+
         # Handle docIds filtering (similar to content generation)
         hits = []
         if has_specific_doc:
@@ -308,15 +314,19 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         
         # Relevance check:
         # 1) If user selected a specific docId and we got ANY hits, trust the user and accept them.
-        # 2) Otherwise, use thresholds based on avg / max similarity.
+        # 2) Otherwise, use thresholds based on avg / max similarity with fallback.
         if has_specific_doc and len(hits) > 0:
             print(f"[CHATBOT] Specific docId selected with {len(hits)} hits - skipping similarity threshold validation")
             is_relevant = True
         else:
-            is_relevant = (
-                (similarity_scores and avg_similarity >= MIN_RELEVANCE_THRESHOLD)
-                or (similarity_scores and max_similarity >= MAX_SIM_THRESHOLD)
-            )
+            if not similarity_scores:
+                is_relevant = False
+            else:
+                is_relevant = (
+                    avg_similarity >= MIN_RELEVANCE_THRESHOLD
+                    or max_similarity >= MAX_SIM_THRESHOLD
+                    or max_similarity >= 0.20  # Fallback: if max is decent, accept
+                )
         
         if not is_relevant:
             print(f"[CHATBOT] Context relevance check failed: avg_similarity {avg_similarity:.3f} < {MIN_RELEVANCE_THRESHOLD} AND max_similarity {max_similarity:.3f} < {MAX_SIM_THRESHOLD}")
@@ -401,11 +411,8 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
             # Build context with sources
             ctx_parts = []
             for i, block in enumerate(context_blocks, 1):
-                # Find the corresponding source (should be unique now)
-                # Since we deduplicated, we need to handle multiple blocks per source
-                
-                # For now, number the blocks and include them
-                ctx_parts.append(f"[Content Block {i}]\n{block}")
+                # Include blocks without citation markers
+                ctx_parts.append(block)
             ctx = "\n\n---\n\n".join(ctx_parts)
         else:
             # Only use this message if we found NO valid content
@@ -417,13 +424,16 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     INSTRUCTIONS:
     1. Answer ONLY using the provided context below
     2. Be helpful and educational
-    3. Cite the sources
-    4. If context is provided but seems insufficient, still give your best answer based on it
+    3. Do NOT include citations, references, or content block markers in your response
+    4. Use **bold** markdown formatting ONLY for headings and subheadings (e.g., **Heading**, **Subheading**)
+    5. Do NOT use other markdown formatting (no __, no *, no #, no lists with -, no code blocks)
+    6. Write in plain text for body content, use **bold** only for headings/subheadings
+    7. If context is provided but seems insufficient, still give your best answer based on it
 
     CONTEXT ({len(context_blocks)} blocks, {len(sources)} sources):
     {ctx}
 
-    Now answer the user's question:"""
+    Now answer the user's question (use **bold** for headings and subheadings only):"""
 
     #     system_prompt = f"""You are ICLeaF LMS's internal-mode assistant. Your role is to help {req.role}s learn from the provided document context.
 

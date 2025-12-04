@@ -35,6 +35,12 @@ interface ChatPageProps {
   apiUrl: string;
 }
 
+// Helper function to render markdown bold (**text**) as HTML
+const renderMarkdownBold = (text: string): string => {
+  // Convert **text** to <strong>text</strong>
+  return text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+};
+
 export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
   const [sessionId, setSessionId] = useState("");
   const [userId, setUserId] = useState("");
@@ -394,9 +400,9 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
                 padding: message.who === "You" ? "12px 16px" : "12px 16px",
                 borderRadius: 8,
                 border: message.who === "You" ? "1px solid #e9ecef" : "1px solid #dee2e6",
-              }}>
-                {message.text}
-              </div>
+              }}
+              dangerouslySetInnerHTML={{ __html: renderMarkdownBold(message.text) }}
+              />
 
               {message.sources && message.sources.length > 0 && (
                 <div style={{ marginTop: 8, paddingLeft: 16 }}>

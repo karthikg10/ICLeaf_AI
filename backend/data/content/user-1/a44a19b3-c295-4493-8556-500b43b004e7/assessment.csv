@@ -1,5 +1,0 @@
-subject,topic,type,question,answer description,levels,total options,Choice Answer One,Choice Answer Two,Choice Answer Three,Choice Answer Four,Choice Answer Five,correct answers,TAG1,TAG2,TAG3
-Data Structures,Arrays,Choice,What is the time complexity of accessing an element in an array?,Accessing an element in an array is done in constant time.,Medium,4,O(1),O(n),O(log n),O(n^2),,1,Time Complexity,Arrays,Access
-Data Structures,Linked Lists,Choice,Which of the following is true about linked lists?,Linked lists allow for efficient insertions and deletions.,Medium,4,They are dynamic in size.,They use contiguous memory.,They are slower than arrays for access.,They can only store integers.,,"1,3",Linked Lists,Data Structures,Efficiency
-Data Structures,Stacks,FillUp,A stack follows which principle?,A stack operates on the Last In First Out principle.,Medium,1,LIFO,,,,,1,Stacks,Data Structures,Principles
-Data Structures,Queues,FillUp,A queue operates on which principle?,A queue operates on the First In First Out principle.,Medium,1,FIFO,,,,,1,Queues,Data Structures,Principles

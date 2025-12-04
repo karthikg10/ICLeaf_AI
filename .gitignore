@@ -36,3 +36,4 @@ backend/server*.log
 backend/data/content/test_*/
 backend/data/uploads/
 *.txt
+backend/.env
