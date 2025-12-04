@@ -238,7 +238,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                         doc_hits = rag.query(
                             req.message,
                             top_k=hits_per_doc,
-                            min_similarity=-0.2,  # More permissive like content generation
+                            min_similarity=0.1,
                             subject_id=subject_id_filter,
                             topic_id=topic_id_filter,
                             doc_id=doc_id
@@ -248,7 +248,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                         doc_hits = rag.query(
                             req.message,
                             top_k=hits_per_doc,
-                            min_similarity=-0.2,
+                            min_similarity=0.1,
                             subject_id=subject_id_filter,
                             topic_id=topic_id_filter,
                             doc_name=doc_id
@@ -269,7 +269,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
             hits = rag.query(
                 req.message,
                 top_k=min(req.top_k, 5),
-                min_similarity=-0.2,  # More permissive like content generation
+                min_similarity=0.1,
                 subject_id=subject_id_filter,
                 topic_id=topic_id_filter,
                 doc_name=doc_name_filter
@@ -277,6 +277,39 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
 
         print(f"[CHATBOT] Internal mode query: '{req.message[:50]}...'")
         print(f"[CHATBOT] Found {len(hits)} RAG hits")
+
+        # Calculate average similarity score to validate relevance
+        MIN_RELEVANCE_THRESHOLD = 0.2  # Minimum average similarity score to consider context relevant
+        similarity_scores = [hit.get("score", 0.0) for hit in hits if hit.get("score") is not None]
+        avg_similarity = sum(similarity_scores) / len(similarity_scores) if similarity_scores else 0.0
+        min_similarity = min(similarity_scores) if similarity_scores else 0.0
+        
+        print(f"[CHATBOT] Average similarity score: {avg_similarity:.3f}, Min: {min_similarity:.3f}")
+        
+        # Validate relevance: only proceed if average similarity meets threshold
+        is_relevant = avg_similarity >= MIN_RELEVANCE_THRESHOLD
+        
+        if not is_relevant:
+            print(f"[CHATBOT] Context relevance check failed: avg_similarity {avg_similarity:.3f} < threshold {MIN_RELEVANCE_THRESHOLD}")
+            # Return "information not found" response without sources
+            answer = "I couldn't find relevant information about this topic in the provided documents. Please try rephrasing your question or check if the topic is covered in the documents."
+            assistant_msg = SessionMessage(
+                role="assistant",
+                content=answer,
+                subjectId=user_msg.subjectId,
+                topicId=user_msg.topicId,
+                docName=user_msg.docName
+            )
+            session_manager.append_history(req.sessionId, assistant_msg)
+            
+            return ChatResponse(
+                success=True,
+                answer=answer,
+                sources=[],  # No sources if not relevant
+                sessionId=req.sessionId,
+                mode=req.mode,
+                timestamp=datetime.now().isoformat()
+            )
 
         # After getting RAG content, CLEAN IT
         for hit in hits:
