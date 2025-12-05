@@ -22,7 +22,7 @@ from . import deps
 from . import session_manager
 from . import embedding_service
 from . import conversation_manager
-from .content_manager import clean_markdown_formatting
+from .content_utils import clean_markdown_formatting
 from . import content_manager
 from .cleanup_service import cleanup_service
 from openai import OpenAI
