@@ -116,7 +116,8 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
     num_slides: 10,
     target_audience: "general" as "children" | "students" | "professionals" | "general",
     include_animations: true,
-    difficulty: "medium" as "easy" | "medium" | "hard"
+    difficulty: "medium" as "easy" | "medium" | "hard",
+    theme: "modern" as "modern" | "professional" | "creative" | "minimal"
   });
   const [compilerConfig] = useState({
     language: "python" as "python" | "javascript" | "java" | "cpp",
@@ -236,7 +237,8 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
             num_slides: 10,
             target_audience: "general",
             include_animations: true,
-            difficulty: "medium"
+            difficulty: "medium",
+            theme: "modern"
           });
         } else if (contentType === "audio") {
           setAudioConfig({
@@ -309,7 +311,8 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
         num_slides: 10,
         target_audience: "general",
         include_animations: true,
-        difficulty: "medium"
+        difficulty: "medium",
+        theme: "modern"
       });
     } else if (contentType === "audio") {
       setAudioConfig({
@@ -859,7 +862,30 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                     <option value="hard">Hard</option>
                   </select>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", marginTop: 20 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                    Theme
+                  </label>
+                  <select
+                    value={pptConfig.theme}
+                    onChange={(e) => setPptConfig({...pptConfig, theme: e.target.value as any})}
+                    style={{
+                      width: "100%",
+                      padding: 8,
+                      border: "1px solid #ccc",
+                      borderRadius: 4,
+                      fontSize: 14,
+                    }}
+                  >
+                    <option value="modern">Modern</option>
+                    <option value="professional">Professional</option>
+                    <option value="creative">Creative</option>
+                    <option value="minimal">Minimal</option>
+                  </select>
+                </div>
+              </div>
+              <div style={{ marginTop: 16 }}>
+                <div style={{ display: "flex", alignItems: "center" }}>
                   <label style={{ display: "flex", alignItems: "center", fontSize: 14, cursor: "pointer" }}>
                     <input
                       type="checkbox"

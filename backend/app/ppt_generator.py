@@ -1,365 +1,597 @@
 # backend/app/ppt_generator.py
-# PowerPoint generation functions
+# PowerPoint generation functions with theme-based styling and branding
 import os
+import json
+from typing import List, Dict, Any
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
 from .models import GenerateContentRequest
-from . import deps
 from .content_utils import (
-    content_client, get_rag_context_for_internal_mode,
-    validate_rag_context_for_internal_mode, extract_openai_response
+    content_client,
+    get_rag_context_for_internal_mode,
+    validate_rag_context_for_internal_mode,
+    extract_openai_response,
 )
+from . import deps
+
+# ============================ THEME DEFINITIONS ============================
+THEMES: Dict[str, Dict[str, Any]] = {
+    # 1. Modern – clean & contemporary
+    "modern": {
+        "bg_mode": "solid",
+        "first_bg_color": (15, 23, 42),   # dark navy
+        "other_bg_color": (15, 23, 42),
+        "accent": (56, 189, 248),         # cyan
+        "title_color": (248, 250, 252),   # almost white
+        "body_color": (226, 232, 240),
+        "title_size_first": 40,
+        "title_size_other": 32,
+        "body_size": 20,
+        "watermark_color": (148, 163, 184),
+    },
+    # 2. Professional – business focused
+    "professional": {
+        "bg_mode": "solid",
+        "first_bg_color": (245, 245, 245),
+        "other_bg_color": (245, 245, 245),
+        "accent": (0, 82, 155),           # corporate blue
+        "title_color": (15, 23, 42),
+        "body_color": (31, 41, 55),
+        "title_size_first": 38,
+        "title_size_other": 30,
+        "body_size": 18,
+        "watermark_color": (156, 163, 175),
+    },
+    # 3. Creative – bold & artistic
+    "creative": {
+        "bg_mode": "solid",
+        "first_bg_color": (24, 24, 27),   # near black
+        "other_bg_color": (24, 24, 27),
+        "accent": (244, 114, 182),        # pink
+        "title_color": (255, 255, 255),
+        "body_color": (243, 244, 246),
+        "title_size_first": 42,
+        "title_size_other": 34,
+        "body_size": 20,
+        "watermark_color": (107, 114, 128),
+    },
+    # 4. Minimal – simple & elegant
+    "minimal": {
+        "bg_mode": "solid",
+        "first_bg_color": (255, 255, 255),
+        "other_bg_color": (255, 255, 255),
+        "accent": (75, 85, 99),
+        "title_color": (17, 24, 39),
+        "body_color": (55, 65, 81),
+        "title_size_first": 36,
+        "title_size_other": 30,
+        "body_size": 18,
+        "watermark_color": (156, 163, 175),
+    },
+}
 
 
-async def generate_ppt_content(request: GenerateContentRequest, content_id: str, storage_path: str) -> str:
-    """Generate PowerPoint with ChatGPT-quality rich content."""
+def _ppt_get_theme(name: str) -> Dict[str, Any]:
+    """Return theme dict, defaulting to 'modern'."""
+    return THEMES.get(name, THEMES["modern"])
+
+
+# ============================ PARSING HELPERS ============================
+def _ppt_extract_json(raw: str) -> str:
+    """Extract valid JSON array from LLM text."""
+    try:
+        start = raw.index("[")
+        end = raw.rindex("]") + 1
+        return raw[start:end]
+    except Exception:
+        return raw
+
+
+def _ppt_parse_json_slides(raw: str) -> List[Dict[str, Any]]:
+    """Return list of slides parsed from JSON output."""
+    try:
+        cleaned = _ppt_extract_json(raw)
+        data = json.loads(cleaned)
+        slides = []
+        for s in data:
+            title = (s.get("title") or "").strip()
+            bullets = [
+                b.strip()
+                for b in s.get("bullets", [])
+                if isinstance(b, str) and b.strip()
+            ]
+            slides.append({"title": title, "bullets": bullets})
+        print(f"[PPT] JSON slides parsed: {len(slides)}")
+        return slides
+    except Exception as e:
+        print(f"[PPT] JSON parsing failed: {e}")
+        return []
+
+
+def _ppt_fallback_parse(raw: str) -> List[Dict[str, Any]]:
+    """Fallback parsing if JSON fails."""
+    slides: List[Dict[str, Any]] = []
+    current = {"title": "", "bullets": []}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.lower().startswith("title:"):
+            if current["title"] or current["bullets"]:
+                slides.append(current)
+            current = {"title": line.split(":", 1)[1].strip(), "bullets": []}
+        elif line.startswith(("-", "•")):
+            current["bullets"].append(line.lstrip("-•").strip())
+        elif line in ("---", "---SLIDE---"):
+            if current["title"] or current["bullets"]:
+                slides.append(current)
+            current = {"title": "", "bullets": []}
+    if current["title"] or current["bullets"]:
+        slides.append(current)
+    print(f"[PPT] Fallback slides parsed: {len(slides)}")
+    return slides
+
+
+def _ppt_title_slide(topic: str, audience: str, difficulty: str) -> Dict[str, Any]:
+    """Title slide content."""
+    return {
+        "title": topic.upper(),
+        "bullets": [
+            "GENERATED BY ICLEAF AI",
+            f"TARGET AUDIENCE: {audience.upper()}",
+            f"DIFFICULTY: {difficulty.upper()}",
+            "AI-POWERED PRESENTATION",
+        ],
+    }
+
+
+# ============================ DRAWING HELPERS ============================
+def _ppt_fill_solid_background(slide, rgb_tuple):
+    """Fill slide background with solid color."""
+    bg = slide.background
+    fill = bg.fill
+    fill.solid()
+    r, g, b = rgb_tuple
+    fill.fore_color.rgb = RGBColor(r, g, b)
+
+
+def _ppt_apply_theme_background(slide, prs, theme: Dict[str, Any], is_first_slide: bool):
+    """Choose background for slide based on theme."""
+    bg_mode = theme.get("bg_mode", "solid")
+    if bg_mode == "solid":
+        color = theme["first_bg_color"] if is_first_slide else theme["other_bg_color"]
+        _ppt_fill_solid_background(slide, color)
+    else:
+        # If you later add image backgrounds, handle them here.
+        color = theme.get("other_bg_color", (255, 255, 255))
+        _ppt_fill_solid_background(slide, color)
+
+
+def _ppt_add_watermark(slide, theme: Dict[str, Any], text: str = "ICLeaf"):
+    """Bottom-left watermark."""
+    left = Inches(0.3)
+    top = Inches(7.0)   # near bottom on 7.5" slide
+    width = Inches(3.0)
+    height = Inches(0.4)
+    box = slide.shapes.add_textbox(left, top, width, height)
+    tf = box.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    p.text = text
+    p.alignment = PP_ALIGN.LEFT
+    run = p.runs[0]
+    font = run.font
+    font.size = Pt(10)
+    font.italic = True
+    wr, wg, wb = theme.get("watermark_color", (180, 180, 180))
+    font.color.rgb = RGBColor(wr, wg, wb)
+
+
+def _ppt_add_icleaf_logo(slide, theme: Dict[str, Any]):
+    """
+    Bottom-right 'ICLeaf' with I and C in orange - larger font.
+    """
+    # slide width = 10", so 7.8" is near right edge
+    left = Inches(10 - 2.5)   # 7.5"
+    top = Inches(7.0)
+    width = Inches(2.5)
+    height = Inches(0.5)
+    box = slide.shapes.add_textbox(left, top, width, height)
+    tf = box.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.RIGHT
+    
+    # Orange for "IC"
+    ORANGE = (249, 115, 22)
+    lr, lg, lb = theme.get("watermark_color", (156, 163, 175))
+    
+    # Ensure paragraph starts empty
+    p.text = ""
+    
+    # Run 1: "IC" in orange - bigger font
+    run1 = p.add_run()
+    run1.text = "IC"
+    font1 = run1.font
+    font1.size = Pt(18)  # Increased from 12 to 18
+    font1.bold = True
+    or_, og, ob = ORANGE
+    font1.color.rgb = RGBColor(or_, og, ob)
+    
+    # Run 2: "Leaf" in neutral color - bigger font
+    run2 = p.add_run()
+    run2.text = "Leaf"
+    font2 = run2.font
+    font2.size = Pt(18)  # Increased from 12 to 18
+    font2.bold = True
+    font2.color.rgb = RGBColor(lr, lg, lb)
+
+
+# ============================ MAIN PPT GENERATOR ============================
+async def generate_ppt_content(
+    request: GenerateContentRequest,
+    content_id: str,
+    storage_path: str,
+) -> str:
+    """
+    Create a PPT using:
+    - LLM-generated JSON slides (content only)
+    - First slide is an ICLeaf title slide
+    - Theme-based background, typography, colors
+    - Bottom-left watermark "ICLeaf"
+    - Bottom-right brand 'ICLeaf' with IC in orange
+    """
     if not content_client:
-        raise Exception("OpenAI client not configured")
+        raise Exception("OpenAI content_client not configured")
     
-    # Get RAG context for internal mode
+    # ---- 1. RAG + CONFIG ----
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
-    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
-    rag_context = rag_result.context
+    validate_rag_context_for_internal_mode(rag_result, request)
+    rag_context = getattr(rag_result, "context", "")
     
-    ppt_config = request.contentConfig.get('ppt', {})
-    num_slides = int(ppt_config.get('num_slides', 10))
-    target_audience = ppt_config.get('target_audience', 'general')
-    difficulty = ppt_config.get('difficulty', 'medium')
+    ppt_cfg = request.contentConfig.get("ppt", {}) or {}
+    num_slides = int(ppt_cfg.get("num_slides", 10))
+    audience = ppt_cfg.get("target_audience", "general")
+    difficulty = ppt_cfg.get("difficulty", "medium")
+    theme_name = ppt_cfg.get("theme", "modern")  # "modern" | "professional" | "creative" | "minimal"
+    topic = (request.prompt or "ICLeaf Presentation").strip()
     
-    print(f"[PPT] Generating {num_slides} information-rich slides (ChatGPT style)")
+    if num_slides < 2:
+        num_slides = 2  # title + 1 slide minimum
     
-    system_prompt = f"""You are a world-class presentation expert like ChatGPT. Create {num_slides} RICH, DETAILED slides.
+    theme = _ppt_get_theme(theme_name)
+    print(f"[PPT] Using theme: {theme_name}")
+    
+    # ---- 2. LLM PROMPT ----
+    system_prompt = f"""
+You are an expert academic presentation designer.
+Create EXACTLY {num_slides - 1} CONTENT SLIDES (WITHOUT the title slide).
+The app will generate its own first slide.
 
-REQUIREMENTS:
-- Create EXACTLY {num_slides} slides
-- Each slide has a CLEAR TITLE
-- Each slide has 4-6 DETAILED bullet points (not just 1-2 words)
-- Bullet points are complete sentences with substance
-- Include data, examples, explanations
-- Professional and engaging
-- Suitable for {target_audience} at {difficulty} level
+OUTPUT FORMAT (JSON array only):
+[
+  {{
+    "title": "Slide Title",
+    "bullets": [
+      "Bullet sentence 1 (15-25 words).",
+      "Bullet sentence 2 (15-25 words).",
+      "Bullet sentence 3 (15-25 words)."
+    ]
+  }},
+  ...
+]
 
-FORMAT FOR EACH SLIDE:
----SLIDE---
-TITLE: [Clear, descriptive title]
-CONTENT: [4-6 detailed bullet points with substance]
----
-
-SLIDE STRUCTURE:
-- Slide 1: Title slide with topic and overview
-- Slides 2-{num_slides-1}: Detailed content with examples, data, explanations
-- Slide {num_slides}: Summary/Conclusion slide
-
-DETAILED CONTENT RULES:
-- Each bullet point should be a complete sentence (20-30 words)
-- Include specific examples
-- Include relevant statistics or data
-- Make it informative, not just pretty
-- Rich with actual information"""
+RULES:
+- 3–6 detailed bullet sentences per slide.
+- Academic, clear, well-structured.
+- Target Audience: {audience}
+- Difficulty: {difficulty}
+"""
     
     if rag_context:
         system_prompt += f"""
 
-IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate slides. Base your content ONLY on the information provided in the context blocks.
-
-CONTEXT FROM UPLOADED DOCUMENTS:
+CONTEXT (STRICTLY USE THIS FOR FACTS):
 {rag_context}
-
-Instructions:
-- Create slides based on the information in the context above
-- Ensure the content is factually accurate to the source material
-- Use specific details, examples, and data from the documents
-- If the context doesn't cover the topic fully, create slides based on what is available"""
-
-    user_prompt = f"""Create {num_slides} detailed, information-rich slides about: {request.prompt}
-
-Make it like ChatGPT presentations - FULL OF INFORMATION and DETAILED.
-Not generic, not simple - RICH CONTENT.
-
-Target audience: {target_audience}
-Difficulty: {difficulty}
-
-Each bullet point should have real substance and information.
-Each slide should be valuable and detailed.
-
-Generate all {num_slides} slides with rich, detailed content:"""
-
+"""
+    
+    user_prompt = f"Generate {num_slides - 1} content slides in JSON for topic: {topic}"
+    
+    # ---- 3. CALL OPENAI ----
     try:
-        print(f"[PPT] Calling OpenAI API...")
         response = content_client.chat.completions.create(
             model=deps.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": user_prompt},
             ],
-            temperature=0.8,
-            max_tokens=5000
+            temperature=0.6,
+            max_tokens=6000,
         )
-        
-        content = extract_openai_response(response)
-        print(f"[PPT] Got {len(content)} characters")
-        
+        raw_text = extract_openai_response(response)
+        print(f"[PPT] LLM characters: {len(raw_text)}")
     except Exception as e:
-        print(f"[PPT] Error: {e}")
-        raise
+        raise Exception(f"[PPT] OpenAI PPT Error: {e}")
     
+    # ---- 4. PARSE SLIDES ----
+    content_slides = _ppt_parse_json_slides(raw_text)
+    if not content_slides:
+        content_slides = _ppt_fallback_parse(raw_text)
+    
+    # Insert title slide at the front
+    title_slide = _ppt_title_slide(topic, audience, difficulty)
+    slides: List[Dict[str, Any]] = [title_slide] + content_slides
+    
+    # Enforce number of slides
+    while len(slides) < num_slides:
+        slides.append(
+            {
+                "title": "ADDITIONAL INFORMATION",
+                "bullets": [
+                    "This slide was automatically added to reach the requested number of slides.",
+                    "You may customize this slide with more topic-specific content later.",
+                ],
+            }
+        )
+    slides = slides[:num_slides]
+    
+    # ---- 5. BUILD PPT ----
+    os.makedirs(storage_path, exist_ok=True)
     ppt_path = os.path.join(storage_path, "presentation.pptx")
     prs = Presentation()
     prs.slide_width = Inches(10)
     prs.slide_height = Inches(7.5)
     
-    slides_data = []
-    current_slide = {"title": "", "bullets": []}
+    # Layout constants
+    TITLE_LEFT = Inches(0.8)
+    TITLE_TOP = Inches(0.9)
+    TITLE_WIDTH = Inches(8.4)
+    TITLE_HEIGHT = Inches(1.3)
+    BULLET_LEFT = Inches(1.0)
+    BULLET_TOP = Inches(2.3)
+    BULLET_WIDTH = Inches(8.2)
+    BULLET_HEIGHT = Inches(4.6)
     
-    for line in content.split('\n'):
-        line = line.strip()
+    for idx, slide_data in enumerate(slides):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
+        is_first = idx == 0
         
-        if line == '---SLIDE---':
-            continue
-        elif line.startswith('TITLE:'):
-            current_slide["title"] = line.replace('TITLE:', '').strip()
-        elif line.startswith('CONTENT:') or line.startswith('BULLET:') or line.startswith('-'):
-            bullet = line.replace('CONTENT:', '').replace('BULLET:', '').replace('-', '', 1).strip()
-            if bullet and len(bullet) > 2:
-                current_slide["bullets"].append(bullet[:100])
-        elif line == '---':
-            if current_slide["title"] or current_slide["bullets"]:
-                slides_data.append(current_slide)
-            current_slide = {"title": "", "bullets": []}
-    
-    if current_slide["title"] or current_slide["bullets"]:
-        slides_data.append(current_slide)
-    
-    print(f"[PPT] Parsed {len(slides_data)} slides from content")
-    
-    while len(slides_data) < num_slides:
-        slides_data.append({
-            "title": f"Additional Information {len(slides_data)}",
-            "bullets": ["Detailed content point 1", "Detailed content point 2", "Detailed content point 3"]
-        })
-    
-    blank_layout = prs.slide_layouts[6]
-    
-    for i, slide_data in enumerate(slides_data[:num_slides]):
-        try:
-            slide = prs.slides.add_slide(blank_layout)
-            
-            title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(9), Inches(0.8))
-            title_frame = title_box.text_frame
-            title_frame.word_wrap = True
-            title_frame.text = slide_data["title"] or f"Slide {i + 1}"
-            
-            for paragraph in title_frame.paragraphs:
-                paragraph.font.size = Pt(44)
-                paragraph.font.bold = True
-                paragraph.font.color.rgb = RGBColor(25, 25, 100)
-            
-            if slide_data["bullets"]:
-                content_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.5), Inches(8.4), Inches(5.5))
-                content_frame = content_box.text_frame
-                content_frame.word_wrap = True
-                
-                for idx, bullet in enumerate(slide_data["bullets"][:6]):
-                    if idx == 0:
-                        p = content_frame.paragraphs[0]
-                    else:
-                        p = content_frame.add_paragraph()
-                    
-                    p.text = f"• {bullet}"
-                    p.level = 0
-                    p.font.size = Pt(18)
-                    p.font.color.rgb = RGBColor(50, 50, 50)
-                    p.space_after = Pt(10)
+        # 5.1 Background according to theme
+        _ppt_apply_theme_background(slide, prs, theme, is_first_slide=is_first)
         
-        except Exception as e:
-            print(f"[PPT] Error on slide {i + 1}: {e}")
-            continue
+        title_text = slide_data.get("title", "") or f"Slide {idx + 1}"
+        bullets = slide_data.get("bullets", []) or []
+        
+        # 5.2 TITLE BOX
+        title_box = slide.shapes.add_textbox(
+            TITLE_LEFT,
+            TITLE_TOP,
+            TITLE_WIDTH,
+            TITLE_HEIGHT,
+        )
+        title_frame = title_box.text_frame
+        title_frame.clear()
+        tp = title_frame.paragraphs[0]
+        tp.text = title_text.upper() if is_first else title_text
+        tp.font.bold = True
+        size = theme["title_size_first"] if is_first else theme["title_size_other"]
+        tp.font.size = Pt(size)
+        tr, tg, tb = theme["title_color"]
+        tp.font.color.rgb = RGBColor(tr, tg, tb)
+        tp.alignment = PP_ALIGN.CENTER if is_first else PP_ALIGN.LEFT
+        
+        # 5.3 BULLET TEXT BOX
+        bullet_box = slide.shapes.add_textbox(
+            BULLET_LEFT,
+            BULLET_TOP,
+            BULLET_WIDTH,
+            BULLET_HEIGHT,
+        )
+        bullet_frame = bullet_box.text_frame
+        bullet_frame.word_wrap = True
+        bullet_frame.clear()
+        first_bullet = True
+        for bullet in bullets[:6]:  # max 6 bullets
+            if first_bullet:
+                bp = bullet_frame.paragraphs[0]
+                first_bullet = False
+            else:
+                bp = bullet_frame.add_paragraph()
+            bp.text = f"• {bullet}"
+            bp.level = 0
+            bp.font.size = Pt(theme["body_size"])
+            br, bg, bb = theme["body_color"]
+            bp.font.color.rgb = RGBColor(br, bg, bb)
+            bp.space_after = Pt(8)
+            bp.alignment = PP_ALIGN.LEFT
+        
+        # 5.4 LOGO (bottom-right only)
+        _ppt_add_icleaf_logo(slide, theme)
     
-    try:
-        prs.save(ppt_path)
-        print(f"[PPT] Generated {len(prs.slides)} slides: {ppt_path}")
-        return ppt_path
-    except Exception as e:
-        print(f"[PPT] Error saving: {e}")
-        raise
+    prs.save(ppt_path)
+    print(f"[PPT] Saved PPT to: {ppt_path}")
+    return ppt_path
 
 
 async def generate_ppt_content_with_path(
-    request: GenerateContentRequest, 
-    content_id: str, 
+    request: GenerateContentRequest,
+    content_id: str,
     storage_path: str,
     filename: str
 ) -> str:
-    """Generate PowerPoint with custom filename."""
+    """
+    Generate PowerPoint with custom filename.
+    Uses the same implementation as generate_ppt_content but with custom filename.
+    """
     if not content_client:
-        raise Exception("OpenAI client not configured")
+        raise Exception("OpenAI content_client not configured")
     
-    # Get RAG context for internal mode
+    # ---- 1. RAG + CONFIG ----
     rag_result = get_rag_context_for_internal_mode(request, top_k=5)
-    validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
-    rag_context = rag_result.context
+    validate_rag_context_for_internal_mode(rag_result, request)
+    rag_context = getattr(rag_result, "context", "")
     
-    ppt_config = request.contentConfig.get('ppt', {})
-    num_slides = int(ppt_config.get('num_slides', 10))
-    target_audience = ppt_config.get('target_audience', 'general')
-    difficulty = ppt_config.get('difficulty', 'medium')
+    ppt_cfg = request.contentConfig.get("ppt", {}) or {}
+    num_slides = int(ppt_cfg.get("num_slides", 10))
+    audience = ppt_cfg.get("target_audience", "general")
+    difficulty = ppt_cfg.get("difficulty", "medium")
+    theme_name = ppt_cfg.get("theme", "modern")  # "modern" | "professional" | "creative" | "minimal"
+    topic = (request.prompt or "ICLeaf Presentation").strip()
     
-    print(f"[PPT] Generating {num_slides} slides for {target_audience} at {difficulty} level")
-    print(f"[PPT] Custom filename: {filename}")
+    if num_slides < 2:
+        num_slides = 2  # title + 1 slide minimum
     
-    system_prompt = f"""You are a world-class presentation expert like ChatGPT. Create {num_slides} RICH, DETAILED slides.
+    theme = _ppt_get_theme(theme_name)
+    print(f"[PPT] Using theme: {theme_name}")
+    
+    # ---- 2. LLM PROMPT ----
+    system_prompt = f"""
+You are an expert academic presentation designer.
+Create EXACTLY {num_slides - 1} CONTENT SLIDES (WITHOUT the title slide).
+The app will generate its own first slide.
 
-REQUIREMENTS:
-- Create EXACTLY {num_slides} slides
-- Each slide has a CLEAR TITLE
-- Each slide has 4-6 DETAILED bullet points (not just 1-2 words)
-- Bullet points are complete sentences with substance
-- Include data, examples, explanations
-- Professional and engaging
-- Suitable for {target_audience} at {difficulty} level
+OUTPUT FORMAT (JSON array only):
+[
+  {{
+    "title": "Slide Title",
+    "bullets": [
+      "Bullet sentence 1 (15-25 words).",
+      "Bullet sentence 2 (15-25 words).",
+      "Bullet sentence 3 (15-25 words)."
+    ]
+  }},
+  ...
+]
 
-FORMAT FOR EACH SLIDE:
----SLIDE---
-TITLE: [Clear, descriptive title]
-CONTENT: [4-6 detailed bullet points with substance]
----
-
-SLIDE STRUCTURE:
-- Slide 1: Title slide with topic and overview
-- Slides 2-{num_slides-1}: Detailed content with examples, data, explanations
-- Slide {num_slides}: Summary/Conclusion slide
-
-DETAILED CONTENT RULES:
-- Each bullet point should be a complete sentence (20-30 words)
-- Include specific examples
-- Include relevant statistics or data
-- Make it informative, not just pretty
-- Rich with actual information"""
+RULES:
+- 3–6 detailed bullet sentences per slide.
+- Academic, clear, well-structured.
+- Target Audience: {audience}
+- Difficulty: {difficulty}
+"""
     
     if rag_context:
         system_prompt += f"""
 
-IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create accurate slides. Base your content ONLY on the information provided in the context blocks.
-
-CONTEXT FROM UPLOADED DOCUMENTS:
+CONTEXT (STRICTLY USE THIS FOR FACTS):
 {rag_context}
-
-Instructions:
-- Create slides based on the information in the context above
-- Ensure the content is factually accurate to the source material
-- Use specific details, examples, and data from the documents
-- If the context doesn't cover the topic fully, create slides based on what is available"""
-
-    user_prompt = f"""Create {num_slides} detailed, information-rich slides about: {request.prompt}
-
-Make it like ChatGPT presentations - FULL OF INFORMATION and DETAILED.
-Not generic, not simple - RICH CONTENT.
-
-Target audience: {target_audience}
-Difficulty: {difficulty}
-
-Each bullet point should have real substance and information.
-Each slide should be valuable and detailed.
-
-Generate all {num_slides} slides with rich, detailed content:"""
-
+"""
+    
+    user_prompt = f"Generate {num_slides - 1} content slides in JSON for topic: {topic}"
+    
+    # ---- 3. CALL OPENAI ----
     try:
-        print(f"[PPT] Calling OpenAI API...")
         response = content_client.chat.completions.create(
             model=deps.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": user_prompt},
             ],
-            temperature=0.8,
-            max_tokens=5000
+            temperature=0.6,
+            max_tokens=6000,
         )
-        
-        content = extract_openai_response(response)
-        print(f"[PPT] Got {len(content)} characters")
-        
+        raw_text = extract_openai_response(response)
+        print(f"[PPT] LLM characters: {len(raw_text)}")
     except Exception as e:
-        print(f"[PPT] Error: {e}")
-        raise
+        raise Exception(f"[PPT] OpenAI PPT Error: {e}")
     
+    # ---- 4. PARSE SLIDES ----
+    content_slides = _ppt_parse_json_slides(raw_text)
+    if not content_slides:
+        content_slides = _ppt_fallback_parse(raw_text)
+    
+    # Insert title slide at the front
+    title_slide = _ppt_title_slide(topic, audience, difficulty)
+    slides: List[Dict[str, Any]] = [title_slide] + content_slides
+    
+    # Enforce number of slides
+    while len(slides) < num_slides:
+        slides.append(
+            {
+                "title": "ADDITIONAL INFORMATION",
+                "bullets": [
+                    "This slide was automatically added to reach the requested number of slides.",
+                    "You may customize this slide with more topic-specific content later.",
+                ],
+            }
+        )
+    slides = slides[:num_slides]
+    
+    # ---- 5. BUILD PPT ----
+    os.makedirs(storage_path, exist_ok=True)
     ppt_path = os.path.join(storage_path, filename)
     prs = Presentation()
     prs.slide_width = Inches(10)
     prs.slide_height = Inches(7.5)
     
-    slides_data = []
-    current_slide = {"title": "", "bullets": []}
+    # Layout constants
+    TITLE_LEFT = Inches(0.8)
+    TITLE_TOP = Inches(0.9)
+    TITLE_WIDTH = Inches(8.4)
+    TITLE_HEIGHT = Inches(1.3)
+    BULLET_LEFT = Inches(1.0)
+    BULLET_TOP = Inches(2.3)
+    BULLET_WIDTH = Inches(8.2)
+    BULLET_HEIGHT = Inches(4.6)
     
-    for line in content.split('\n'):
-        line = line.strip()
+    for idx, slide_data in enumerate(slides):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
+        is_first = idx == 0
         
-        if line == '---SLIDE---':
-            continue
-        elif line.startswith('TITLE:'):
-            current_slide["title"] = line.replace('TITLE:', '').strip()
-        elif line.startswith('CONTENT:') or line.startswith('BULLET:') or line.startswith('-'):
-            bullet = line.replace('CONTENT:', '').replace('BULLET:', '').replace('-', '', 1).strip()
-            if bullet and len(bullet) > 2:
-                current_slide["bullets"].append(bullet[:100])
-        elif line == '---':
-            if current_slide["title"] or current_slide["bullets"]:
-                slides_data.append(current_slide)
-            current_slide = {"title": "", "bullets": []}
-    
-    if current_slide["title"] or current_slide["bullets"]:
-        slides_data.append(current_slide)
-    
-    print(f"[PPT] Parsed {len(slides_data)} slides")
-    
-    while len(slides_data) < num_slides:
-        slides_data.append({
-            "title": f"Additional Information {len(slides_data)}",
-            "bullets": ["Detailed content point 1", "Detailed content point 2", "Detailed content point 3"]
-        })
-    
-    blank_layout = prs.slide_layouts[6]
-    
-    for i, slide_data in enumerate(slides_data[:num_slides]):
-        try:
-            slide = prs.slides.add_slide(blank_layout)
-            
-            title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(9), Inches(0.8))
-            title_frame = title_box.text_frame
-            title_frame.word_wrap = True
-            title_frame.text = slide_data["title"] or f"Slide {i + 1}"
-            
-            for paragraph in title_frame.paragraphs:
-                paragraph.font.size = Pt(44)
-                paragraph.font.bold = True
-                paragraph.font.color.rgb = RGBColor(25, 25, 100)
-            
-            if slide_data["bullets"]:
-                content_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.5), Inches(8.4), Inches(5.5))
-                content_frame = content_box.text_frame
-                content_frame.word_wrap = True
-                
-                for idx, bullet in enumerate(slide_data["bullets"][:6]):
-                    if idx == 0:
-                        p = content_frame.paragraphs[0]
-                    else:
-                        p = content_frame.add_paragraph()
-                    
-                    p.text = f"• {bullet}"
-                    p.level = 0
-                    p.font.size = Pt(18)
-                    p.font.color.rgb = RGBColor(50, 50, 50)
-                    p.space_after = Pt(10)
+        # 5.1 Background according to theme
+        _ppt_apply_theme_background(slide, prs, theme, is_first_slide=is_first)
         
-        except Exception as e:
-            print(f"[PPT] Error on slide {i + 1}: {e}")
-            continue
+        title_text = slide_data.get("title", "") or f"Slide {idx + 1}"
+        bullets = slide_data.get("bullets", []) or []
+        
+        # 5.2 TITLE BOX
+        title_box = slide.shapes.add_textbox(
+            TITLE_LEFT,
+            TITLE_TOP,
+            TITLE_WIDTH,
+            TITLE_HEIGHT,
+        )
+        title_frame = title_box.text_frame
+        title_frame.clear()
+        tp = title_frame.paragraphs[0]
+        tp.text = title_text.upper() if is_first else title_text
+        tp.font.bold = True
+        size = theme["title_size_first"] if is_first else theme["title_size_other"]
+        tp.font.size = Pt(size)
+        tr, tg, tb = theme["title_color"]
+        tp.font.color.rgb = RGBColor(tr, tg, tb)
+        tp.alignment = PP_ALIGN.CENTER if is_first else PP_ALIGN.LEFT
+        
+        # 5.3 BULLET TEXT BOX
+        bullet_box = slide.shapes.add_textbox(
+            BULLET_LEFT,
+            BULLET_TOP,
+            BULLET_WIDTH,
+            BULLET_HEIGHT,
+        )
+        bullet_frame = bullet_box.text_frame
+        bullet_frame.word_wrap = True
+        bullet_frame.clear()
+        first_bullet = True
+        for bullet in bullets[:6]:  # max 6 bullets
+            if first_bullet:
+                bp = bullet_frame.paragraphs[0]
+                first_bullet = False
+            else:
+                bp = bullet_frame.add_paragraph()
+            bp.text = f"• {bullet}"
+            bp.level = 0
+            bp.font.size = Pt(theme["body_size"])
+            br, bg, bb = theme["body_color"]
+            bp.font.color.rgb = RGBColor(br, bg, bb)
+            bp.space_after = Pt(8)
+            bp.alignment = PP_ALIGN.LEFT
+        
+        # 5.4 LOGO (bottom-right only)
+        _ppt_add_icleaf_logo(slide, theme)
     
-    try:
-        prs.save(ppt_path)
-        print(f"[PPT] Generated {len(prs.slides)} slides: {ppt_path}")
-        return ppt_path
-    except Exception as e:
-        print(f"[PPT] Error saving: {e}")
-        raise
-
+    prs.save(ppt_path)
+    print(f"[PPT] Saved PPT to: {ppt_path}")
+    return ppt_path

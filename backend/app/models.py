@@ -286,6 +286,7 @@ class PPTConfig(BaseModel):
     target_audience: str = "general"  # "children", "students", "professionals", "general"
     include_animations: bool = True
     difficulty: str = "medium"  # "easy", "medium", "hard"
+    theme: str = "modern"  # "modern", "professional", "creative", "minimal"
 
 class ContentConfig(BaseModel):
     flashcard: Optional[FlashcardConfig] = None
