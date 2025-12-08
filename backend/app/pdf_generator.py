@@ -7,6 +7,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
+from reportlab.pdfgen.canvas import Canvas
+from reportlab.lib.enums import TA_LEFT
 from .models import GenerateContentRequest
 from . import deps
 from .content_utils import (
@@ -14,6 +16,36 @@ from .content_utils import (
     validate_rag_context_for_internal_mode, extract_openai_response,
     clean_markdown_formatting
 )
+
+
+def _add_watermark(canvas: Canvas, doc) -> None:
+    """Draw a subtle ICLeaf watermark across the page background."""
+    canvas.saveState()
+    width, height = doc.pagesize
+    canvas.translate(width / 2.0, height / 2.0)
+    canvas.rotate(30)
+    canvas.setFont("Helvetica-Bold", 60)
+    canvas.setFillColorRGB(0.88, 0.88, 0.88)  # light gray, unobtrusive
+    canvas.drawCentredString(0, 0, "ICLeaf")
+    canvas.restoreState()
+
+
+def _add_header_footer(canvas: Canvas, doc, subject: str = "", topic: str = "") -> None:
+    """Add header (subject/topic) and footer (page number)."""
+    canvas.saveState()
+    width, height = doc.pagesize
+
+    header_text = " • ".join([v for v in [subject, topic] if v])
+    canvas.setFont("Helvetica-Bold", 9)
+    canvas.setFillColorRGB(0.15, 0.15, 0.2)
+    if header_text:
+        canvas.drawString(50, height - 25, header_text)
+
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColorRGB(0.2, 0.2, 0.2)
+    canvas.drawRightString(width - 50, 20, f"Page {doc.page}")
+
+    canvas.restoreState()
 
 
 async def generate_pdf_content(request: GenerateContentRequest, content_id: str, storage_path: str) -> str:
@@ -40,24 +72,28 @@ async def generate_pdf_content(request: GenerateContentRequest, content_id: str,
     system_prompt = f"""You are a professional content writer. GENERATE EXACTLY {num_pages} PAGES of content.
 
 STRICT REQUIREMENTS:
-1. Write EXACTLY {total_words_needed} words (for {num_pages} pages at ~300 words/page)
+1. You MUST write EXACTLY {total_words_needed} words - this is MANDATORY and NOT optional
 2. Target Audience: {target_audience}
 3. Difficulty: {difficulty}
-4. Structure: Title page + Body sections + Conclusion
+4. Structure: Introduction + Multiple detailed sections + Conclusion
 5. NO markdown formatting whatsoever
 6. NO ** or other special characters
 7. Write in clear, proper English sentences
-8. Include detailed explanations and examples
+8. Include extensive detailed explanations, examples, use cases, and elaborations
 9. Break into clear sections with newlines between them
+10. Continue writing even if you think you've covered the topic - add more examples and details
 
 FORMATTING RULES:
-- Each section should be 300-400 words
+- Each major section should be 300-500 words
 - Use section titles (plain text, no **bold**)
 - Separate sections with blank lines
 - NO bullet points, NO markdown, NO special formatting
 - Write as a professional document
+- Expand extensively on each concept to reach the word count
 
-WORD COUNT: {total_words_needed} words minimum"""
+WORD COUNT: You MUST generate at least {total_words_needed} words. Do NOT stop until you reach this exact word count. Keep writing until you reach {total_words_needed} words.
+
+IMPORTANT: Do NOT include word count information (like "Word Count: X words") in the generated content. Write only the actual document content."""
     
     if rag_context:
         system_prompt += f"""
@@ -71,23 +107,30 @@ Instructions:
 - Create content based on the information in the context above
 - Ensure the content is factually accurate to the source material
 - Use specific details and examples from the documents
-- Expand on the concepts found in the context to reach the required word count
-- If the context doesn't cover the topic fully, create content based on what is available"""
+- Expand extensively on the concepts found in the context to reach the required {total_words_needed} words
+- Add multiple examples, use cases, practical applications, common mistakes, best practices
+- If the context doesn't cover the topic fully, create content based on what is available and expand it
+- CRITICAL: Continue writing until you reach {total_words_needed} words - do not stop early"""
 
     user_prompt = f"""Create a {num_pages}-page document about: {request.prompt}
 
-MUST REQUIREMENTS:
-- Write EXACTLY {total_words_needed} words
-- Create {num_pages} full pages of content
+CRITICAL REQUIREMENTS:
+- You MUST write EXACTLY {total_words_needed} words - this is MANDATORY
+- Create {num_pages} full pages of detailed content
 - Target audience: {target_audience}
 - Difficulty: {difficulty}
-- Include detailed explanations
-- Include real-world examples
-- Professional tone
+- Include extensive detailed explanations
+- Include multiple real-world examples, use cases, and practical applications
+- Add common mistakes, best practices, and troubleshooting tips
+- Professional, educational tone
 - NO markdown, NO ** formatting, NO special characters
-- Write in plain, clear English
+- Write in plain, clear English paragraphs
 
-START WRITING NOW - aim for {total_words_needed} words:"""
+IMPORTANT: Do NOT stop writing until you reach {total_words_needed} words. Continue adding content even if you think the topic is covered. Add more examples, explanations, and details until you reach the exact word count.
+
+CRITICAL: Do NOT include any word count statements (like "Word Count: X words") in your output. Write only the document content itself.
+
+START WRITING NOW - you must write {total_words_needed} words:"""
 
     try:
         print(f"[PDF] Calling OpenAI API (requesting {total_words_needed} words)...")
@@ -98,7 +141,7 @@ START WRITING NOW - aim for {total_words_needed} words:"""
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
-            max_tokens=4000 + (num_pages * 500)
+            max_tokens=4000 + (num_pages * 800)
         )
         
         content = extract_openai_response(response)
@@ -112,6 +155,9 @@ START WRITING NOW - aim for {total_words_needed} words:"""
     content = re.sub(r'\*\*', '', content)
     content = re.sub(r'__', '', content)
     content = re.sub(r'\*(?!\s)', '', content)
+    # Remove word count mentions from content
+    content = re.sub(r'(?i)word\s+count[:\s]*\d+\s+words?', '', content)
+    content = re.sub(r'(?i)total\s+words?[:\s]*\d+', '', content)
     
     pdf_path = os.path.join(storage_path, "document.pdf")
     
@@ -146,24 +192,6 @@ START WRITING NOW - aim for {total_words_needed} words:"""
         alignment=4
     )
     
-    metadata_style = ParagraphStyle(
-        'CustomMetadata',
-        parent=styles['Normal'],
-        fontSize=11,
-        leading=14,
-        spaceAfter=8,
-        alignment=0,
-        fontName='Helvetica'
-    )
-    
-    # Add subject and topic fields if available
-    if request.subjectName or request.topicName:
-        if request.subjectName:
-            story.append(Paragraph(f"<b>Subject:</b> {request.subjectName}", metadata_style))
-        if request.topicName:
-            story.append(Paragraph(f"<b>Topic:</b> {request.topicName}", metadata_style))
-        story.append(Spacer(1, 0.15 * inch))
-    
     paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
     
     for para in paragraphs:
@@ -175,7 +203,11 @@ START WRITING NOW - aim for {total_words_needed} words:"""
             story.append(Spacer(1, 0.05 * inch))
     
     try:
-        doc.build(story)
+        doc.build(
+            story,
+            onFirstPage=lambda c, d: (_add_watermark(c, d), _add_header_footer(c, d, request.subjectName or "", request.topicName or "")),
+            onLaterPages=lambda c, d: (_add_watermark(c, d), _add_header_footer(c, d, request.subjectName or "", request.topicName or "")),
+        )
         print(f"[PDF] Generated {pdf_path}")
         return pdf_path
     except Exception as e:
@@ -213,24 +245,28 @@ async def generate_pdf_content_with_path(
     system_prompt = f"""You are a professional content writer. GENERATE EXACTLY {num_pages} PAGES of content.
 
 STRICT REQUIREMENTS:
-1. Write EXACTLY {total_words_needed} words (for {num_pages} pages at ~300 words/page)
+1. You MUST write EXACTLY {total_words_needed} words - this is MANDATORY and NOT optional
 2. Target Audience: {target_audience}
 3. Difficulty: {difficulty}
-4. Structure: Title page + Body sections + Conclusion
+4. Structure: Introduction + Multiple detailed sections + Conclusion
 5. NO markdown formatting whatsoever
 6. NO ** or other special characters
 7. Write in clear, proper English sentences
-8. Include detailed explanations and examples
+8. Include extensive detailed explanations, examples, use cases, and elaborations
 9. Break into clear sections with newlines between them
+10. Continue writing even if you think you've covered the topic - add more examples and details
 
 FORMATTING RULES:
-- Each section should be 300-400 words
+- Each major section should be 300-500 words
 - Use section titles (plain text, no **bold**)
 - Separate sections with blank lines
 - NO bullet points, NO markdown, NO special formatting
 - Write as a professional document
+- Expand extensively on each concept to reach the word count
 
-WORD COUNT: {total_words_needed} words minimum"""
+WORD COUNT: You MUST generate at least {total_words_needed} words. Do NOT stop until you reach this exact word count. Keep writing until you reach {total_words_needed} words.
+
+IMPORTANT: Do NOT include word count information (like "Word Count: X words") in the generated content. Write only the actual document content."""
     
     if rag_context:
         system_prompt += f"""
@@ -244,23 +280,30 @@ Instructions:
 - Create content based on the information in the context above
 - Ensure the content is factually accurate to the source material
 - Use specific details and examples from the documents
-- Expand on the concepts found in the context to reach the required word count
-- If the context doesn't cover the topic fully, create content based on what is available"""
+- Expand extensively on the concepts found in the context to reach the required {total_words_needed} words
+- Add multiple examples, use cases, practical applications, common mistakes, best practices
+- If the context doesn't cover the topic fully, create content based on what is available and expand it
+- CRITICAL: Continue writing until you reach {total_words_needed} words - do not stop early"""
 
     user_prompt = f"""Create a {num_pages}-page document about: {request.prompt}
 
-MUST REQUIREMENTS:
-- Write EXACTLY {total_words_needed} words
-- Create {num_pages} full pages of content
+CRITICAL REQUIREMENTS:
+- You MUST write EXACTLY {total_words_needed} words - this is MANDATORY
+- Create {num_pages} full pages of detailed content
 - Target audience: {target_audience}
 - Difficulty: {difficulty}
-- Include detailed explanations
-- Include real-world examples
-- Professional tone
+- Include extensive detailed explanations
+- Include multiple real-world examples, use cases, and practical applications
+- Add common mistakes, best practices, and troubleshooting tips
+- Professional, educational tone
 - NO markdown, NO ** formatting, NO special characters
-- Write in plain, clear English
+- Write in plain, clear English paragraphs
 
-START WRITING NOW - aim for {total_words_needed} words:"""
+IMPORTANT: Do NOT stop writing until you reach {total_words_needed} words. Continue adding content even if you think the topic is covered. Add more examples, explanations, and details until you reach the exact word count.
+
+CRITICAL: Do NOT include any word count statements (like "Word Count: X words") in your output. Write only the document content itself.
+
+START WRITING NOW - you must write {total_words_needed} words:"""
 
     try:
         print(f"[PDF] Calling OpenAI API (requesting {total_words_needed} words)...")
@@ -271,7 +314,7 @@ START WRITING NOW - aim for {total_words_needed} words:"""
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
-            max_tokens=4000 + (num_pages * 500)
+            max_tokens=4000 + (num_pages * 800)
         )
         
         content = extract_openai_response(response)
@@ -284,6 +327,9 @@ START WRITING NOW - aim for {total_words_needed} words:"""
     content = clean_markdown_formatting(content)
     content = re.sub(r'\*\*', '', content)
     content = re.sub(r'__', '', content)
+    # Remove word count mentions from content
+    content = re.sub(r'(?i)word\s+count[:\s]*\d+\s+words?', '', content)
+    content = re.sub(r'(?i)total\s+words?[:\s]*\d+', '', content)
     
     pdf_path = os.path.join(storage_path, filename)
     
@@ -318,24 +364,6 @@ START WRITING NOW - aim for {total_words_needed} words:"""
         alignment=4
     )
     
-    metadata_style = ParagraphStyle(
-        'CustomMetadata',
-        parent=styles['Normal'],
-        fontSize=11,
-        leading=14,
-        spaceAfter=8,
-        alignment=0,
-        fontName='Helvetica'
-    )
-    
-    # Add subject and topic fields if available
-    if request.subjectName or request.topicName:
-        if request.subjectName:
-            story.append(Paragraph(f"<b>Subject:</b> {request.subjectName}", metadata_style))
-        if request.topicName:
-            story.append(Paragraph(f"<b>Topic:</b> {request.topicName}", metadata_style))
-        story.append(Spacer(1, 0.15 * inch))
-    
     paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
     
     for para in paragraphs:
@@ -347,7 +375,11 @@ START WRITING NOW - aim for {total_words_needed} words:"""
             story.append(Spacer(1, 0.05 * inch))
     
     try:
-        doc.build(story)
+        doc.build(
+            story,
+            onFirstPage=lambda c, d: (_add_watermark(c, d), _add_header_footer(c, d, request.subjectName or "", request.topicName or "")),
+            onLaterPages=lambda c, d: (_add_watermark(c, d), _add_header_footer(c, d, request.subjectName or "", request.topicName or "")),
+        )
         print(f"[PDF] Generated: {pdf_path}")
         return pdf_path
     except Exception as e:
