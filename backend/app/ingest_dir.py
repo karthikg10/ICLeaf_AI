@@ -54,16 +54,27 @@ def _pretty_title_from_filename(path: str) -> str:
 
 def _extract_pdf_text_enhanced(path: str) -> str:
     """
-    Extract text from PDF with special handling for PowerPoint PDFs.
+    Extract text from PDF with special handling for PowerPoint PDFs and image-based PDFs.
     
-    For PPT-as-PDF files:
+    For PPT-as-PDF files and PDFs with images:
     - Uses multiple extraction strategies
     - Preserves structure where possible
-    - Falls back to OCR if text extraction fails
+    - Uses OCR to extract text from images (even when some text is already extracted)
+    - Combines extracted text with OCR text for comprehensive coverage
     """
     import pypdf
     
     all_text = []
+    ocr_available = False
+    
+    # Check if OCR libraries are available
+    try:
+        import pytesseract
+        from pdf2image import convert_from_path
+        from PIL import Image
+        ocr_available = True
+    except ImportError:
+        print("[ingest] OCR libraries not available. Install pytesseract, pdf2image, and Pillow for image text extraction.")
     
     try:
         pdf = pypdf.PdfReader(path)
@@ -72,9 +83,10 @@ def _extract_pdf_text_enhanced(path: str) -> str:
         for page_idx, page in enumerate(pdf.pages):
             # Strategy 1: Standard text extraction
             page_text = page.extract_text() or ""
+            extracted_text_length = len(page_text.strip())
             
             # Strategy 2: If extraction is minimal, try extracting from annotations/objects
-            if not page_text.strip() or len(page_text.strip()) < 50:
+            if not page_text.strip() or extracted_text_length < 50:
                 # For PPT PDFs, text might be in text boxes or special objects
                 # Try to extract from page objects if available
                 try:
@@ -85,36 +97,62 @@ def _extract_pdf_text_enhanced(path: str) -> str:
                                 annot_text = annot_obj["/Contents"]
                                 if isinstance(annot_text, str):
                                     page_text += "\n" + annot_text
+                                    extracted_text_length = len(page_text.strip())
                 except:
                     pass  # Annotation extraction is optional
             
-            # Strategy 3: OCR fallback for image-based PDFs
-            if not page_text.strip():
+            # Strategy 3: OCR for image-based PDFs and PPTs saved as PDFs
+            # Run OCR if:
+            # 1. No text was extracted, OR
+            # 2. Very little text was extracted (< 100 chars), OR
+            # 3. Text seems incomplete (for PPTs saved as PDFs with images)
+            should_run_ocr = (
+                ocr_available and (
+                    not page_text.strip() or 
+                    extracted_text_length < 100 or
+                    # For PPT PDFs, even if some text exists, images might contain more
+                    (extracted_text_length > 0 and extracted_text_length < 200)
+                )
+            )
+            
+            ocr_text = ""
+            if should_run_ocr:
                 try:
-                    import pytesseract
-                    from pdf2image import convert_from_path
-                    from PIL import Image
-                    
                     # Convert page to image and OCR
                     img_list = convert_from_path(
                         path, 
                         first_page=page_idx+1, 
                         last_page=page_idx+1, 
-                        dpi=200
+                        dpi=300  # Increased DPI for better OCR accuracy
                     )
                     
                     for img in img_list:
                         if isinstance(img, Image.Image):
-                            ocr_text = pytesseract.image_to_string(img)
-                            if ocr_text.strip():
-                                page_text = ocr_text
+                            ocr_result = pytesseract.image_to_string(img, lang='eng')
+                            if ocr_result.strip():
+                                ocr_text = ocr_result.strip()
                                 break
-                except ImportError:
-                    # OCR not available - skip
-                    pass
                 except Exception as ocr_error:
                     # OCR failed - continue without it
-                    pass
+                    print(f"[ingest] OCR failed for page {page_idx + 1}: {ocr_error}")
+            
+            # Combine extracted text with OCR text
+            # Remove duplicates and merge intelligently
+            if ocr_text:
+                if page_text.strip():
+                    # Both extracted text and OCR text exist
+                    # Combine them, removing obvious duplicates
+                    combined_text = page_text.strip()
+                    # Add OCR text if it's significantly different
+                    ocr_words = set(ocr_text.lower().split())
+                    extracted_words = set(page_text.lower().split())
+                    new_words = ocr_words - extracted_words
+                    if len(new_words) > 5:  # If OCR found substantial new content
+                        combined_text += "\n\n[Text from images]\n" + ocr_text
+                    page_text = combined_text
+                else:
+                    # Only OCR text available
+                    page_text = ocr_text
             
             # Clean up and add page text
             if page_text.strip():

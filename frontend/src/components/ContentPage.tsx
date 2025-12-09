@@ -136,7 +136,7 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
       return;
     }
 
-    // Validate required fields for PDF generation
+    // Validate required fields for PDF generation (internal mode)
     if (contentType === "pdf" && mode === "internal") {
       if (!subjectName.trim()) {
         alert("Please enter a Subject Name for PDF generation");
@@ -144,6 +144,10 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
       }
       if (!topicName.trim()) {
         alert("Please enter a Topic Name for PDF generation");
+        return;
+      }
+      if (!docIds.trim()) {
+        alert("Please provide at least one Doc ID for PDF generation in internal mode");
         return;
       }
     }
@@ -547,9 +551,9 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                   </div>
                 </div>
                 <div style={{ marginBottom: 16 }}>
-                  <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-                    Document IDs (docIds) - Optional
-                  </label>
+                <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                  Document IDs (docIds) - Required for internal PDF
+                </label>
                   <input
                     type="text"
                     value={docIds}
