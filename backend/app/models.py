@@ -280,6 +280,7 @@ class PDFConfig(BaseModel):
     target_audience: str = "general"  # "children", "students", "professionals", "general"
     include_images: bool = True
     difficulty: str = "medium"  # "easy", "medium", "hard"
+    words_per_page: int = 480  # Words per page (200-1000 range)
 
 class PPTConfig(BaseModel):
     num_slides: int = 10

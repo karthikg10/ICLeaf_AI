@@ -64,10 +64,14 @@ async def generate_pdf_content(request: GenerateContentRequest, content_id: str,
     include_images = pdf_config.get('include_images', True)
     difficulty = pdf_config.get('difficulty', 'medium')
     
-    print(f"[PDF] Generating EXACTLY {num_pages} pages for {target_audience} at {difficulty} level")
+    # Get words_per_page with validation (200-1000 range)
+    words_per_page = int(pdf_config.get('words_per_page', 480))
+    words_per_page = max(200, min(1000, words_per_page))  # Clamp between 200-1000
     
-    words_per_page = 300
     total_words_needed = num_pages * words_per_page
+    
+    print(f"[PDF] Generating EXACTLY {num_pages} pages for {target_audience} at {difficulty} level")
+    print(f"[PDF] Target: {total_words_needed} words ({words_per_page} words/page)")
     
     system_prompt = f"""You are a professional content writer. GENERATE EXACTLY {num_pages} PAGES of content.
 
@@ -141,7 +145,7 @@ START WRITING NOW - you must write {total_words_needed} words:"""
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
-            max_tokens=4000 + (num_pages * 800)
+            max_tokens=4000 + (total_words_needed // 2)  # Dynamic based on words needed
         )
         
         content = extract_openai_response(response)
@@ -164,40 +168,81 @@ START WRITING NOW - you must write {total_words_needed} words:"""
     doc = SimpleDocTemplate(
         pdf_path,
         pagesize=A4,
-        rightMargin=50,
-        leftMargin=50,
-        topMargin=50,
-        bottomMargin=50
+        leftMargin=60,    # ~0.83"
+        rightMargin=60,
+        topMargin=72,     # 1"
+        bottomMargin=72,
     )
     
     styles = getSampleStyleSheet()
     story = []
     
-    heading_style = ParagraphStyle(
-        'CustomHeading',
-        parent=styles['Heading1'],
-        fontSize=18,
-        textColor=colors.HexColor('#1a1a4d'),
-        spaceAfter=16,
+    # Typography hierarchy: Title, H1, H2, Body
+    title_style = ParagraphStyle(
+        "Title",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=22,
+        leading=28,
+        textColor=colors.HexColor("#1a1a4d"),
+        spaceAfter=18,
+    )
+    
+    h1_style = ParagraphStyle(
+        "Heading1",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=20,
+        textColor=colors.HexColor("#1a1a4d"),
         spaceBefore=12,
-        fontName='Helvetica-Bold'
+        spaceAfter=8,
+    )
+    
+    h2_style = ParagraphStyle(
+        "Heading2",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=17,
+        textColor=colors.HexColor("#333333"),
+        spaceBefore=10,
+        spaceAfter=6,
     )
     
     body_style = ParagraphStyle(
-        'CustomBody',
-        parent=styles['Normal'],
-        fontSize=12,
-        leading=16,
-        spaceAfter=12,
-        alignment=4
+        "Body",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=11,
+        leading=15,       # ~1.35 line spacing
+        spaceAfter=8,
+        alignment=4,      # justified
     )
     
     paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
     
+    # Enhanced heading detection with hierarchy
+    is_first_heading = True
     for para in paragraphs:
-        if len(para) < 100 and len(para.split()) < 15 and para.isupper():
-            story.append(Paragraph(para, heading_style))
+        word_count = len(para.split())
+        char_count = len(para)
+        
+        # Detect Title (first heading, typically longer)
+        if is_first_heading and char_count < 150 and word_count < 20 and (para.isupper() or para[0].isupper()):
+            story.append(Paragraph(para, title_style))
+            story.append(Spacer(1, 0.15 * inch))
+            is_first_heading = False
+        # Detect H1 (uppercase or title case, short, typically major sections)
+        elif char_count < 100 and word_count < 15 and (para.isupper() or (para[0].isupper() and word_count < 10)):
+            story.append(Paragraph(para, h1_style))
             story.append(Spacer(1, 0.1 * inch))
+            is_first_heading = False
+        # Detect H2 (shorter than body, title case, typically subsections)
+        elif char_count < 80 and word_count < 12 and para[0].isupper() and not para.isupper():
+            story.append(Paragraph(para, h2_style))
+            story.append(Spacer(1, 0.08 * inch))
+        # Body text
         else:
             story.append(Paragraph(para, body_style))
             story.append(Spacer(1, 0.05 * inch))
@@ -236,11 +281,15 @@ async def generate_pdf_content_with_path(
     include_images = pdf_config.get('include_images', True)
     difficulty = pdf_config.get('difficulty', 'medium')
     
+    # Get words_per_page with validation (200-1000 range)
+    words_per_page = int(pdf_config.get('words_per_page', 480))
+    words_per_page = max(200, min(1000, words_per_page))  # Clamp between 200-1000
+    
+    total_words_needed = num_pages * words_per_page
+    
     print(f"[PDF] Generating EXACTLY {num_pages} pages for {target_audience} at {difficulty} level")
     print(f"[PDF] Custom filename: {filename}")
-    
-    words_per_page = 300
-    total_words_needed = num_pages * words_per_page
+    print(f"[PDF] Target: {total_words_needed} words ({words_per_page} words/page)")
     
     system_prompt = f"""You are a professional content writer. GENERATE EXACTLY {num_pages} PAGES of content.
 
@@ -314,7 +363,7 @@ START WRITING NOW - you must write {total_words_needed} words:"""
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
-            max_tokens=4000 + (num_pages * 800)
+            max_tokens=4000 + (total_words_needed // 2)  # Dynamic based on words needed
         )
         
         content = extract_openai_response(response)
@@ -336,40 +385,81 @@ START WRITING NOW - you must write {total_words_needed} words:"""
     doc = SimpleDocTemplate(
         pdf_path,
         pagesize=A4,
-        rightMargin=50,
-        leftMargin=50,
-        topMargin=50,
-        bottomMargin=50
+        leftMargin=60,    # ~0.83"
+        rightMargin=60,
+        topMargin=72,     # 1"
+        bottomMargin=72,
     )
     
     styles = getSampleStyleSheet()
     story = []
     
-    heading_style = ParagraphStyle(
-        'CustomHeading',
-        parent=styles['Heading1'],
-        fontSize=18,
-        textColor=colors.HexColor('#1a1a4d'),
-        spaceAfter=16,
+    # Typography hierarchy: Title, H1, H2, Body
+    title_style = ParagraphStyle(
+        "Title",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=22,
+        leading=28,
+        textColor=colors.HexColor("#1a1a4d"),
+        spaceAfter=18,
+    )
+    
+    h1_style = ParagraphStyle(
+        "Heading1",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=20,
+        textColor=colors.HexColor("#1a1a4d"),
         spaceBefore=12,
-        fontName='Helvetica-Bold'
+        spaceAfter=8,
+    )
+    
+    h2_style = ParagraphStyle(
+        "Heading2",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=17,
+        textColor=colors.HexColor("#333333"),
+        spaceBefore=10,
+        spaceAfter=6,
     )
     
     body_style = ParagraphStyle(
-        'CustomBody',
-        parent=styles['Normal'],
-        fontSize=12,
-        leading=16,
-        spaceAfter=12,
-        alignment=4
+        "Body",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=11,
+        leading=15,       # ~1.35 line spacing
+        spaceAfter=8,
+        alignment=4,      # justified
     )
     
     paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
     
+    # Enhanced heading detection with hierarchy
+    is_first_heading = True
     for para in paragraphs:
-        if len(para) < 100 and len(para.split()) < 15 and para.isupper():
-            story.append(Paragraph(para, heading_style))
+        word_count = len(para.split())
+        char_count = len(para)
+        
+        # Detect Title (first heading, typically longer)
+        if is_first_heading and char_count < 150 and word_count < 20 and (para.isupper() or para[0].isupper()):
+            story.append(Paragraph(para, title_style))
+            story.append(Spacer(1, 0.15 * inch))
+            is_first_heading = False
+        # Detect H1 (uppercase or title case, short, typically major sections)
+        elif char_count < 100 and word_count < 15 and (para.isupper() or (para[0].isupper() and word_count < 10)):
+            story.append(Paragraph(para, h1_style))
             story.append(Spacer(1, 0.1 * inch))
+            is_first_heading = False
+        # Detect H2 (shorter than body, title case, typically subsections)
+        elif char_count < 80 and word_count < 12 and para[0].isupper() and not para.isupper():
+            story.append(Paragraph(para, h2_style))
+            story.append(Spacer(1, 0.08 * inch))
+        # Body text
         else:
             story.append(Paragraph(para, body_style))
             story.append(Spacer(1, 0.05 * inch))
