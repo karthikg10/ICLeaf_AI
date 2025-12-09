@@ -163,6 +163,9 @@ START WRITING NOW - you must write {total_words_needed} words:"""
     content = re.sub(r'(?i)word\s+count[:\s]*\d+\s+words?', '', content)
     content = re.sub(r'(?i)total\s+words?[:\s]*\d+', '', content)
     
+    # Create storage path only after validation/generation succeeded to avoid empty dirs
+    os.makedirs(storage_path, exist_ok=True)
+
     pdf_path = os.path.join(storage_path, "document.pdf")
     
     doc = SimpleDocTemplate(
@@ -380,6 +383,9 @@ START WRITING NOW - you must write {total_words_needed} words:"""
     content = re.sub(r'(?i)word\s+count[:\s]*\d+\s+words?', '', content)
     content = re.sub(r'(?i)total\s+words?[:\s]*\d+', '', content)
     
+    # Create storage path only after validation/generation succeeded to avoid empty dirs
+    os.makedirs(storage_path, exist_ok=True)
+
     pdf_path = os.path.join(storage_path, filename)
     
     doc = SimpleDocTemplate(

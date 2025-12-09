@@ -50,6 +50,11 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         "customFileName": request.customFileName,
         "customFilePath": request.customFilePath,
     }
+
+    # Enforce docId requirement for PDF generation in internal mode
+    if request.mode == "internal" and request.contentType == "pdf":
+        if not request.docIds or len([d for d in request.docIds if str(d).strip()]) == 0:
+            raise Exception("At least one docId is required for PDF generation in internal mode.")
     
     if request.mode == "internal":
         try:
@@ -80,11 +85,14 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         # Determine storage path
         if request.customFilePath:
             storage_path = request.customFilePath
-            os.makedirs(storage_path, exist_ok=True)
             print(f"[CONTENT] Using custom path: {storage_path}")
         else:
-            storage_path = create_content_directory(request.userId, content_id)
+            storage_path = f"./data/content/{request.userId}/{content_id}"
             print(f"[CONTENT] Using default path: {storage_path}")
+
+        # Create-on-write helper so we don't leave empty dirs when validation fails
+        def ensure_storage_dir() -> None:
+            os.makedirs(storage_path, exist_ok=True)
         
         # Determine filename (base name without extension)
         if request.customFileName:
@@ -99,6 +107,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         actual_filename = ""
         
         if request.contentType == "flashcard" and request.contentConfig.get('flashcard'):
+            ensure_storage_dir()
             flashcard_config_dict = request.contentConfig.get('flashcard')
             flashcard_config = FlashcardConfig(
                 front=flashcard_config_dict.get('front', ''),
@@ -111,6 +120,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "quiz" and request.contentConfig.get('quiz'):
+            ensure_storage_dir()
             quiz_config_dict = request.contentConfig.get('quiz')
             quiz_config = QuizConfig(
                 num_questions=quiz_config_dict.get('num_questions', 5),
@@ -122,6 +132,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "assessment" and request.contentConfig.get('assessment'):
+            ensure_storage_dir()
             assessment_config_dict = request.contentConfig.get('assessment')
             assessment_config = AssessmentConfig(**assessment_config_dict)
             rows = await generate_assessment_table(request, assessment_config)
@@ -138,18 +149,21 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "video" and request.contentConfig.get('video'):
+            ensure_storage_dir()
             video_config_dict = request.contentConfig.get('video')
             video_config = VideoConfig(**video_config_dict)
             generated_content = await generate_video_content(request, video_config, content_id, storage_path, base_filename=base_filename)
             actual_filename = os.path.basename(generated_content)
             file_path = generated_content
         elif request.contentType == "audio" and request.contentConfig.get('audio'):
+            ensure_storage_dir()
             audio_config_dict = request.contentConfig.get('audio')
             audio_config = AudioConfig(**audio_config_dict)
             generated_content = await generate_audio_content(request, audio_config, content_id, storage_path, base_filename=base_filename)
             actual_filename = os.path.basename(generated_content)
             file_path = generated_content
         elif request.contentType == "compiler" and request.contentConfig.get('compiler'):
+            ensure_storage_dir()
             compiler_config_dict = request.contentConfig.get('compiler')
             compiler_config = CompilerConfig(**compiler_config_dict)
             generated_content = await generate_compiler_content(request, compiler_config)
