@@ -62,6 +62,14 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
       alert("Please enter both a user ID and session ID before chatting.");
       return false;
     }
+    // For internal mode, docIds is required
+    if (mode === "internal") {
+      const docIdsArray = docIds.split(",").map(id => id.trim()).filter(id => id);
+      if (docIdsArray.length === 0) {
+        alert("At least one docId is required for internal mode chat. Please enter comma-separated document IDs.");
+        return false;
+      }
+    }
     return true;
   };
 
@@ -137,13 +145,12 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
         if (subjectId) requestBody.subjectId = subjectId;
         if (topicId) requestBody.topicId = topicId;
         if (docName) requestBody.docName = docName;
-        // Parse comma-separated docIds and add to request
-        if (docIds) {
-          const docIdsArray = docIds.split(",").map(id => id.trim()).filter(id => id);
-          if (docIdsArray.length > 0) {
-            requestBody.docIds = docIdsArray;
-          }
+        // Parse comma-separated docIds and add to request (required for internal mode)
+        const docIdsArray = docIds.split(",").map(id => id.trim()).filter(id => id);
+        if (docIdsArray.length === 0) {
+          throw new Error("At least one docId is required for internal mode chat.");
         }
+        requestBody.docIds = docIdsArray;
       }
 
       const response = await fetch(`${apiUrl}/api/chatbot/query`, {
@@ -167,12 +174,17 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
       }]);
       setSources(data.sources || []);
     } catch (error: any) {
+      const errorMessage = error.message || "An error occurred while processing your request.";
       setMessages(prev => [...prev, { 
         who: "Assistant", 
-        text: `Error: ${error.message}`, 
+        text: `Error: ${errorMessage}`, 
         mode,
         timestamp: new Date().toISOString()
       }]);
+      // Show alert for validation errors
+      if (errorMessage.includes("docId") || errorMessage.includes("required")) {
+        alert(errorMessage);
+      }
     } finally {
       setBusy(false);
     }
@@ -315,15 +327,18 @@ export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {
           </div>
           
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <label style={{ fontSize: 14, fontWeight: 600, minWidth: 60 }}>Doc IDs:</label>
+            <label style={{ fontSize: 14, fontWeight: 600, minWidth: 60 }}>
+              Doc IDs: <span style={{ color: "#dc3545" }}>*</span>
+            </label>
             <input
               type="text"
               value={docIds}
               onChange={(e) => setDocIds(e.target.value)}
-              placeholder="Comma-separated docIds (optional)"
+              placeholder="Comma-separated docIds (required)"
+              required
               style={{
                 padding: "6px 8px",
-                border: "1px solid #ccc",
+                border: docIds.trim() ? "1px solid #ccc" : "1px solid #dc3545",
                 borderRadius: 4,
                 fontSize: 12,
                 width: 250,

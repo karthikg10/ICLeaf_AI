@@ -1,6 +1,6 @@
 # backend/app/models.py
 from typing import List, Literal, Optional
-from pydantic import BaseModel, field_validator, Field, constr
+from pydantic import BaseModel, field_validator, Field, constr, model_validator
 from datetime import datetime
 
 Role = Literal["student", "teacher", "admin"]
@@ -58,6 +58,16 @@ class ChatRequest(BaseModel):
             elif not isinstance(v, str):
                 raise ValueError(f"Expected string, got {type(v).__name__}")
         return v
+    
+    # Validate that docIds is required for internal mode
+    @model_validator(mode='after')
+    def _validate_docIds_for_internal_mode(self):
+        if self.mode == "internal":
+            # Filter out empty strings and check if any valid docIds remain
+            valid_doc_ids = [d for d in self.docIds if d and str(d).strip()]
+            if not valid_doc_ids:
+                raise ValueError("At least one docId is required for internal mode chat.")
+        return self
 
 class Source(BaseModel):
     title: str
