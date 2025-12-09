@@ -102,18 +102,10 @@ def _extract_pdf_text_enhanced(path: str) -> str:
                     pass  # Annotation extraction is optional
             
             # Strategy 3: OCR for image-based PDFs and PPTs saved as PDFs
-            # Run OCR if:
-            # 1. No text was extracted, OR
-            # 2. Very little text was extracted (< 100 chars), OR
-            # 3. Text seems incomplete (for PPTs saved as PDFs with images)
-            should_run_ocr = (
-                ocr_available and (
-                    not page_text.strip() or 
-                    extracted_text_length < 100 or
-                    # For PPT PDFs, even if some text exists, images might contain more
-                    (extracted_text_length > 0 and extracted_text_length < 200)
-                )
-            )
+            # ALWAYS run OCR for PDFs to capture text from images
+            # This is critical for PPT PDFs where text is often embedded in images
+            # We'll combine OCR text with extracted text intelligently
+            should_run_ocr = ocr_available
             
             ocr_text = ""
             if should_run_ocr:

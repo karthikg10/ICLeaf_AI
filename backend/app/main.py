@@ -35,6 +35,16 @@ from .cleanup_service import cleanup_service
 
 app = FastAPI(title="ICLeaF Chatbot", version="0.2")
 
+# ---- CORS (for the React frontend) ----
+# IMPORTANT: Add CORS middleware BEFORE including routers
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=deps.ALLOWED_ORIGINS if deps.ALLOWED_ORIGINS else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Include the API router
 app.include_router(api_router, prefix="/api")
 
@@ -342,14 +352,7 @@ if __name__ == "__main__":
 
 
 
-# ---- CORS (for the React frontend) ----
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=deps.ALLOWED_ORIGINS if deps.ALLOWED_ORIGINS else ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS middleware is now configured at the top (before router inclusion)
 
 # ---- LLM client ----
 client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else None

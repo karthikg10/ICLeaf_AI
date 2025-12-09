@@ -25,6 +25,8 @@ from . import conversation_manager
 from .content_utils import clean_markdown_formatting
 from . import content_manager
 from .cleanup_service import cleanup_service
+from .query_clarifier import evaluate_query_for_clarification
+from .conversation_context import expand_query_with_context, get_conversation_summary
 from openai import OpenAI
 import time
 import os
@@ -172,6 +174,13 @@ def internal_search(
         }
     }
 
+@api_router.options("/chatbot/query")
+async def chatbot_query_options(request: Request):
+    """Handle OPTIONS preflight requests for CORS."""
+    from fastapi.responses import Response
+    # Return empty response with 200 status - CORS middleware will add headers
+    return Response(status_code=200, content="")
+
 @api_router.post("/chatbot/query", response_model=ChatResponse)
 async def chatbot_query(req: ChatRequest = Body(...)):
     """
@@ -210,16 +219,67 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         docName=req.docName
     )
     session_manager.append_history(req.sessionId, user_msg)
+
+    # Get conversation history for clarification check
+    conversation_history = session_manager.get_history(req.sessionId, last=10)
+
+    # Early clarification step shared by both internal and external modes.
+    # Pass history so it can skip clarification for follow-ups and confirmations
+    clarification = evaluate_query_for_clarification(req.message, conversation_history)
+    if clarification.should_clarify:
+        answer = clarification.message or (
+            "I want to be sure I understand your request. Could you rephrase it?"
+        )
+
+        assistant_msg = SessionMessage(
+            role="assistant",
+            content=answer,
+            subjectId=user_msg.subjectId,
+            topicId=user_msg.topicId,
+            docName=user_msg.docName
+        )
+        session_manager.append_history(req.sessionId, assistant_msg)
+
+        response_time = time.time() - start_time
+        conversation = Conversation(
+            sessionId=req.sessionId,
+            userId=req.userId,
+            mode=req.mode,
+            subjectId=req.subjectId,
+            topicId=req.topicId,
+            docName=req.docName,
+            userMessage=req.message,
+            aiResponse=answer,
+            sources=[],
+            responseTime=response_time,
+            tokenCount=len(answer.split())
+        )
+        conversation_manager.add_conversation(conversation)
+
+        return ChatResponse(
+            answer=answer,
+            sources=[],
+            sessionId=req.sessionId,
+            mode=req.mode
+        )
     # INTERNAL (RAG) mode - FIXED VERSION
 
     # INTERNAL (RAG) mode
     if req.mode == "internal":
+        # Get conversation history for context expansion
+        conversation_history = session_manager.get_history(req.sessionId, last=10)
+        
+        # Expand query with context if it's a follow-up question
+        search_query, was_expanded = expand_query_with_context(req.message, conversation_history)
+        if was_expanded:
+            print(f"[CHATBOT] Expanded query for context: '{req.message}' -> '{search_query[:100]}...'")
+        
         # Apply metadata filters if provided
         subject_id_filter = req.subjectId if req.subjectId else None
         topic_id_filter = req.topicId if req.topicId else None
         doc_name_filter = req.docName if req.docName else None
 
-        # Query-length aware settings
+        # Query-length aware settings (use original message for token count)
         query_tokens = len(req.message.split())
         has_specific_doc = bool(req.docIds and len(req.docIds) > 0)
         
@@ -259,7 +319,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                     # UUID-style docId vs legacy filename
                     if len(doc_id) == 36 and doc_id.count('-') == 4:  # UUID format
                         doc_hits = rag.query(
-                            req.message,
+                            search_query,  # Use expanded query for better context
                             top_k=hits_per_doc,
                             min_similarity=DOC_ID_QUERY_MIN_SIMILARITY,  # VERY permissive
                             subject_id=subject_id_filter,
@@ -269,7 +329,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                     else:
                         # Legacy: filter by doc_name or filename
                         doc_hits = rag.query(
-                            req.message,
+                            search_query,  # Use expanded query for better context
                             top_k=hits_per_doc,
                             min_similarity=DOC_ID_QUERY_MIN_SIMILARITY,  # VERY permissive
                             subject_id=subject_id_filter,
@@ -290,7 +350,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         else:
             # No docIds specified, normal query
             hits = rag.query(
-                req.message,
+                search_query,  # Use expanded query for better context
                 top_k=min(req.top_k, 5),
                 min_similarity=QUERY_MIN_SIMILARITY,
                 subject_id=subject_id_filter,
@@ -418,6 +478,12 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
             # Only use this message if we found NO valid content
             ctx = "No relevant context found in the documents."
 
+        # Get conversation summary for context
+        conversation_summary = get_conversation_summary(conversation_history)
+        context_note = ""
+        if conversation_summary:
+            context_note = f"\n\nPREVIOUS CONVERSATION CONTEXT:\n{conversation_summary}\n\nUse this context to understand references like 'it', 'its', 'the topic', etc. in the user's question."
+        
         # Build system prompt with context
         system_prompt = f"""You are ICLeaF LMS's internal-mode assistant helping students learn from documents.
 
@@ -429,9 +495,10 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     5. Do NOT use other markdown formatting (no __, no *, no #, no lists with -, no code blocks)
     6. Write in plain text for body content, use **bold** only for headings/subheadings
     7. If context is provided but seems insufficient, still give your best answer based on it
+    8. IMPORTANT: Use the conversation history below to understand follow-up questions. If the user asks about "it", "its", "the topic", etc., refer to the previous conversation context to understand what they're referring to.
 
     CONTEXT ({len(context_blocks)} blocks, {len(sources)} sources):
-    {ctx}
+    {ctx}{context_note}
 
     Now answer the user's question (use **bold** for headings and subheadings only):"""
 
@@ -567,9 +634,18 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
 
     # CLOUD (web / YouTube / GitHub) mode
     print(f"[CHATBOT] Cloud mode query: '{req.message[:50]}...'")
+    
+    # Get conversation history for context expansion
+    conversation_history = session_manager.get_history(req.sessionId, last=10)
+    
+    # Expand query with context if it's a follow-up question
+    search_query, was_expanded = expand_query_with_context(req.message, conversation_history)
+    if was_expanded:
+        print(f"[CHATBOT] Expanded query for context: '{req.message}' -> '{search_query[:100]}...'")
+    
     if deps.TAVILY_API_KEY:
         try:
-            web_results = await wc.tavily_search(req.message, deps.TAVILY_API_KEY, max_results=5)
+            web_results = await wc.tavily_search(search_query, deps.TAVILY_API_KEY, max_results=5)  # Use expanded query
             for r in web_results:
                 sources.append(
                     Source(
@@ -593,7 +669,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
 
     if len(context_blocks) < 8 and deps.YOUTUBE_API_KEY:
         try:
-            yt_results = await wc.youtube_search(req.message, deps.YOUTUBE_API_KEY, max_results=3)
+            yt_results = await wc.youtube_search(search_query, deps.YOUTUBE_API_KEY, max_results=3)  # Use expanded query
             for y in yt_results:
                 sources.append(Source(title=f"YouTube: {y['title']}", url=y["url"]))
                 transcript = wc.youtube_fetch_transcript_text(y["videoId"])
@@ -607,7 +683,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
 
     if len(context_blocks) < 8:
         try:
-            gh_results = await wc.github_search_code(req.message, deps.GITHUB_TOKEN, max_results=3)
+            gh_results = await wc.github_search_code(search_query, deps.GITHUB_TOKEN, max_results=3)  # Use expanded query
             for g in gh_results:
                 text, dl_url = await wc.github_fetch_file_text(g.get("api_url"), deps.GITHUB_TOKEN)
                 title = f"GitHub: {g.get('repository_full_name')}/{g.get('path')}"
@@ -623,11 +699,20 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     print(f"[CHATBOT] Total sources collected: {len(sources)}")
     print(f"[CHATBOT] Total context blocks: {len(context_blocks)}")
 
+    # Get conversation summary for context
+    conversation_summary = get_conversation_summary(conversation_history)
+    context_note = ""
+    if conversation_summary:
+        context_note = f"\n\nPREVIOUS CONVERSATION CONTEXT:\n{conversation_summary}\n\nUse this context to understand references like 'it', 'its', 'the topic', etc. in the user's question. If the user asks about 'it', 'its pros', 'the topic', etc., refer to the previous conversation to understand what they're referring to."
+    
     system_prompt = (
         "You are ICLeaF LMS's cloud-mode assistant. "
         f"User role: {req.role}. Provide concise, correct answers. "
         "If context is provided, cite sources with [1], [2], ... matching the source list. "
-        "If you're unsure, say so."
+        "If you're unsure, say so. "
+        "IMPORTANT: Use the conversation history below to understand follow-up questions. "
+        "If the user asks about 'it', 'its', 'the topic', etc., refer to the previous conversation context to understand what they're referring to."
+        + context_note
     )
     ctx = "\n\n".join([f"[Source {i+1}]\n{b}" for i, b in enumerate(context_blocks)]) if context_blocks else ""
     messages: List[dict] = [{"role": "system", "content": system_prompt}]
