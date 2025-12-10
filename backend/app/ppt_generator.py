@@ -169,7 +169,7 @@ def _ppt_apply_theme_background(slide, prs, theme: Dict[str, Any], is_first_slid
         _ppt_fill_solid_background(slide, color)
 
 
-def _ppt_add_watermark(slide, theme: Dict[str, Any], text: str = "ICLeaf"):
+def _ppt_add_watermark(slide, theme: Dict[str, Any], text: str = "ICLeaF"):
     """Bottom-left watermark."""
     left = Inches(0.3)
     top = Inches(7.0)   # near bottom on 7.5" slide
@@ -191,7 +191,7 @@ def _ppt_add_watermark(slide, theme: Dict[str, Any], text: str = "ICLeaf"):
 
 def _ppt_add_icleaf_logo(slide, theme: Dict[str, Any]):
     """
-    Bottom-right 'ICLeaf' with I and C in orange - larger font.
+    Bottom-right 'ICLeaF' with I and C in orange - larger font.
     """
     # slide width = 10", so 7.8" is near right edge
     left = Inches(10 - 2.5)   # 7.5"
@@ -220,9 +220,9 @@ def _ppt_add_icleaf_logo(slide, theme: Dict[str, Any]):
     or_, og, ob = ORANGE
     font1.color.rgb = RGBColor(or_, og, ob)
     
-    # Run 2: "Leaf" in neutral color - bigger font
+    # Run 2: "LeaF" in neutral color - bigger font (capital F)
     run2 = p.add_run()
-    run2.text = "Leaf"
+    run2.text = "LeaF"
     font2 = run2.font
     font2.size = Pt(18)  # Increased from 12 to 18
     font2.bold = True
@@ -238,10 +238,10 @@ async def generate_ppt_content(
     """
     Create a PPT using:
     - LLM-generated JSON slides (content only)
-    - First slide is an ICLeaf title slide
+    - First slide is an ICLeaF title slide
     - Theme-based background, typography, colors
-    - Bottom-left watermark "ICLeaf"
-    - Bottom-right brand 'ICLeaf' with IC in orange
+    - Bottom-left watermark "ICLeaF"
+    - Bottom-right brand 'ICLeaF' with IC in orange
     """
     if not content_client:
         raise Exception("OpenAI content_client not configured")
@@ -256,7 +256,7 @@ async def generate_ppt_content(
     audience = ppt_cfg.get("target_audience", "general")
     difficulty = ppt_cfg.get("difficulty", "medium")
     theme_name = ppt_cfg.get("theme", "modern")  # "modern" | "professional" | "creative" | "minimal"
-    topic = (request.prompt or "ICLeaf Presentation").strip()
+    topic = (request.prompt or "ICLeaF Presentation").strip()
     
     if num_slides < 2:
         num_slides = 2  # title + 1 slide minimum
@@ -438,7 +438,7 @@ async def generate_ppt_content_with_path(
     audience = ppt_cfg.get("target_audience", "general")
     difficulty = ppt_cfg.get("difficulty", "medium")
     theme_name = ppt_cfg.get("theme", "modern")  # "modern" | "professional" | "creative" | "minimal"
-    topic = (request.prompt or "ICLeaf Presentation").strip()
+    topic = (request.prompt or "ICLeaF Presentation").strip()
     
     if num_slides < 2:
         num_slides = 2  # title + 1 slide minimum

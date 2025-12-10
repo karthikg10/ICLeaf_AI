@@ -19,14 +19,17 @@ from .content_utils import (
 
 
 def _add_watermark(canvas: Canvas, doc) -> None:
-    """Draw a subtle ICLeaf watermark across the page background."""
+    """Draw a subtle ICLeaF watermark across the page background.
+    The watermark is drawn as part of the page content and is not editable."""
     canvas.saveState()
     width, height = doc.pagesize
     canvas.translate(width / 2.0, height / 2.0)
     canvas.rotate(30)
     canvas.setFont("Helvetica-Bold", 60)
     canvas.setFillColorRGB(0.88, 0.88, 0.88)  # light gray, unobtrusive
-    canvas.drawCentredString(0, 0, "ICLeaf")
+    # Draw watermark as part of page content (not editable)
+    # Use drawCentredString which renders text as part of the page graphics
+    canvas.drawCentredString(0, 0, "ICLeaF")
     canvas.restoreState()
 
 
