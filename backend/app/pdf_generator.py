@@ -83,19 +83,32 @@ STRICT REQUIREMENTS:
 2. Target Audience: {target_audience}
 3. Difficulty: {difficulty}
 4. Structure: Introduction + Multiple detailed sections + Conclusion
-5. NO markdown formatting whatsoever
-6. NO ** or other special characters
-7. Write in clear, proper English sentences
-8. Include extensive detailed explanations, examples, use cases, and elaborations
-9. Break into clear sections with newlines between them
-10. Continue writing even if you think you've covered the topic - add more examples and details
+5. NO markdown formatting (no #, no **, no __)
+6. Write in clear, proper English sentences
+7. Include extensive detailed explanations, examples, use cases, and elaborations
+8. Break into clear sections with newlines between them
+9. Continue writing even if you think you've covered the topic - add more examples and details
 
-FORMATTING RULES:
+FORMATTING RULES FOR HEADINGS AND STRUCTURE:
+- CRITICAL: You MUST include clear headings and subheadings to structure your content
+- Main headings (H1): Write in ALL CAPS or Title Case, keep them short (5-15 words), put each on its own line
+- Subheadings (H2): Write in Title Case, keep them short (3-12 words), put each on its own line
+- Example heading format:
+  INTRODUCTION
+  (blank line)
+  Main content paragraph here...
+  
+  KEY CONCEPTS
+  (blank line)
+  Main content paragraph here...
+  
+  Advanced Topics
+  (blank line)
+  Main content paragraph here...
 - Each major section should be 300-500 words
-- Use section titles (plain text, no **bold**)
 - Separate sections with blank lines
-- NO bullet points, NO markdown, NO special formatting
-- Write as a professional document
+- NO bullet points, NO markdown symbols (#, **, __), NO special formatting characters
+- Write as a professional document with clear hierarchical structure
 - Expand extensively on each concept to reach the word count
 
 WORD COUNT: You MUST generate at least {total_words_needed} words. Do NOT stop until you reach this exact word count. Keep writing until you reach {total_words_needed} words.
@@ -130,14 +143,32 @@ CRITICAL REQUIREMENTS:
 - Include multiple real-world examples, use cases, and practical applications
 - Add common mistakes, best practices, and troubleshooting tips
 - Professional, educational tone
-- NO markdown, NO ** formatting, NO special characters
+- NO markdown symbols (#, **, __), NO special formatting characters
 - Write in plain, clear English paragraphs
+
+STRUCTURE REQUIREMENTS:
+- MUST include clear headings and subheadings to organize the content
+- Use ALL CAPS or Title Case for main headings (one per major section)
+- Use Title Case for subheadings (for subsections)
+- Put each heading on its own line, followed by a blank line, then the content
+- Example structure:
+  INTRODUCTION
+  [blank line]
+  Content paragraph here...
+  
+  MAIN CONCEPTS
+  [blank line]
+  Content paragraph here...
+  
+  Advanced Applications
+  [blank line]
+  Content paragraph here...
 
 IMPORTANT: Do NOT stop writing until you reach {total_words_needed} words. Continue adding content even if you think the topic is covered. Add more examples, explanations, and details until you reach the exact word count.
 
 CRITICAL: Do NOT include any word count statements (like "Word Count: X words") in your output. Write only the document content itself.
 
-START WRITING NOW - you must write {total_words_needed} words:"""
+START WRITING NOW - you must write {total_words_needed} words with clear headings and structure:"""
 
     try:
         print(f"[PDF] Calling OpenAI API (requesting {total_words_needed} words)...")
@@ -304,19 +335,32 @@ STRICT REQUIREMENTS:
 2. Target Audience: {target_audience}
 3. Difficulty: {difficulty}
 4. Structure: Introduction + Multiple detailed sections + Conclusion
-5. NO markdown formatting whatsoever
-6. NO ** or other special characters
-7. Write in clear, proper English sentences
-8. Include extensive detailed explanations, examples, use cases, and elaborations
-9. Break into clear sections with newlines between them
-10. Continue writing even if you think you've covered the topic - add more examples and details
+5. NO markdown formatting (no #, no **, no __)
+6. Write in clear, proper English sentences
+7. Include extensive detailed explanations, examples, use cases, and elaborations
+8. Break into clear sections with newlines between them
+9. Continue writing even if you think you've covered the topic - add more examples and details
 
-FORMATTING RULES:
+FORMATTING RULES FOR HEADINGS AND STRUCTURE:
+- CRITICAL: You MUST include clear headings and subheadings to structure your content
+- Main headings (H1): Write in ALL CAPS or Title Case, keep them short (5-15 words), put each on its own line
+- Subheadings (H2): Write in Title Case, keep them short (3-12 words), put each on its own line
+- Example heading format:
+  INTRODUCTION
+  (blank line)
+  Main content paragraph here...
+  
+  KEY CONCEPTS
+  (blank line)
+  Main content paragraph here...
+  
+  Advanced Topics
+  (blank line)
+  Main content paragraph here...
 - Each major section should be 300-500 words
-- Use section titles (plain text, no **bold**)
 - Separate sections with blank lines
-- NO bullet points, NO markdown, NO special formatting
-- Write as a professional document
+- NO bullet points, NO markdown symbols (#, **, __), NO special formatting characters
+- Write as a professional document with clear hierarchical structure
 - Expand extensively on each concept to reach the word count
 
 WORD COUNT: You MUST generate at least {total_words_needed} words. Do NOT stop until you reach this exact word count. Keep writing until you reach {total_words_needed} words.
@@ -351,14 +395,32 @@ CRITICAL REQUIREMENTS:
 - Include multiple real-world examples, use cases, and practical applications
 - Add common mistakes, best practices, and troubleshooting tips
 - Professional, educational tone
-- NO markdown, NO ** formatting, NO special characters
+- NO markdown symbols (#, **, __), NO special formatting characters
 - Write in plain, clear English paragraphs
+
+STRUCTURE REQUIREMENTS:
+- MUST include clear headings and subheadings to organize the content
+- Use ALL CAPS or Title Case for main headings (one per major section)
+- Use Title Case for subheadings (for subsections)
+- Put each heading on its own line, followed by a blank line, then the content
+- Example structure:
+  INTRODUCTION
+  [blank line]
+  Content paragraph here...
+  
+  MAIN CONCEPTS
+  [blank line]
+  Content paragraph here...
+  
+  Advanced Applications
+  [blank line]
+  Content paragraph here...
 
 IMPORTANT: Do NOT stop writing until you reach {total_words_needed} words. Continue adding content even if you think the topic is covered. Add more examples, explanations, and details until you reach the exact word count.
 
 CRITICAL: Do NOT include any word count statements (like "Word Count: X words") in your output. Write only the document content itself.
 
-START WRITING NOW - you must write {total_words_needed} words:"""
+START WRITING NOW - you must write {total_words_needed} words with clear headings and structure:"""
 
     try:
         print(f"[PDF] Calling OpenAI API (requesting {total_words_needed} words)...")
