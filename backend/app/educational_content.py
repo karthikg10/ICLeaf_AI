@@ -340,7 +340,7 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
     columns = [
         "question", "type", "answer_description", "levels", "total_options",
         "choice_answer_one", "choice_answer_two", "choice_answer_three", 
-        "choice_answer_four", "choice_answer_five", "correct_answers", "tag1", "tag2"
+        "choice_answer_four", "correct_answers", "tag1", "tag2"
     ]
     system_prompt = (
         "You generate assessment rows for CSV/XLSX export. "
@@ -351,10 +351,18 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
         "2. 'type': 'Choice', 'FillUp', or 'Match'\n"
         "3. 'answer_description': Brief explanation\n"
         "4. 'levels': 'Easy', 'Medium', or 'Difficult'\n"
-        "5. 'total_options': Number of options\n"
-        "6. 'choice_answer_one' to 'choice_answer_five': The answer options\n"
-        "7. 'correct_answers': '1' or '1,2' for Choice; 'a=1,b=2,c=3' for Match\n"
+        "5. 'total_options': Number of options - ALWAYS set to 4 for ALL question types\n"
+        "   - For 'Choice': Always set to 4 (exactly 4 multiple choice options)\n"
+        "   - For 'FillUp': Always set to 4 (exactly 4 answer options)\n"
+        "   - For 'Match': Always set to 4 (exactly 4 matching pairs)\n"
+        "6. 'choice_answer_one' to 'choice_answer_four': The answer options (exactly 4 options)\n"
+        "   - For 'Choice': Provide exactly 4 multiple choice options\n"
+        "   - For 'FillUp': Provide exactly 4 answer options (one for each blank)\n"
+        "   - For 'Match': Provide the matching pairs\n"
+        "7. 'correct_answers': '1' or '1,2' for Choice; answer text for FillUp; 'a=1,b=2,c=3' for Match\n"
         "8. 'tag1', 'tag2': Tags\n\n"
+        
+        "CRITICAL: For ALL question types (Choice, FillUp, Match), 'total_options' MUST be 4, and you MUST provide exactly 4 options in choice_answer_one through choice_answer_four.\n\n"
         
         f"Create exactly 4 rows. Difficulty: {config.difficulty}."
     )
@@ -403,6 +411,21 @@ Instructions:
         for col in columns:
             value = row.get(col, "")
             norm[col] = str(value) if value else ""
+        
+        # Ensure ALL question types have exactly 4 total_options
+        question_type = norm.get("type", "").strip().lower()
+        if question_type in ["choice", "fillup", "match"]:
+            norm["total_options"] = "4"
+            # Ensure all 4 choice answers exist (even if empty)
+            if "choice_answer_one" not in norm:
+                norm["choice_answer_one"] = ""
+            if "choice_answer_two" not in norm:
+                norm["choice_answer_two"] = ""
+            if "choice_answer_three" not in norm:
+                norm["choice_answer_three"] = ""
+            if "choice_answer_four" not in norm:
+                norm["choice_answer_four"] = ""
+        
         norm_rows.append(norm)
     
     return norm_rows
@@ -439,19 +462,32 @@ def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], su
         "text_wrap": True
     })
     
-    # Row 1: Subject header
+    # Row 1: Subject header (12 columns total: question + 11 others)
     ws.write(0, 0, subject_name, subject_fmt)
-    for col in range(1, 13):
+    for col in range(1, 12):
         ws.write(0, col, '', subject_fmt)
     
-    # Row 2: Column labels
+    # Row 2: Column labels - all 12 columns
     ws.write(1, 0, topic_name, label_fmt)
-    labels = ["type", "answer description", "levels", "total options"] + [''] * 8
+    labels = [
+        "type", 
+        "answer description", 
+        "levels", 
+        "total options",
+        "choice answer one",
+        "choice answer two", 
+        "choice answer three",
+        "choice answer four",
+        "correct answers",
+        "tag1",
+        "tag2"
+    ]
     for col, label in enumerate(labels, start=1):
         ws.write(1, col, label, label_fmt)
     
     # Rows 3+: Data
     for row_idx, r in enumerate(rows, start=2):
+        # Only 4 choice answers (one through four)
         data_row = [
             r.get("question", ""),
             r.get("type", ""),
@@ -462,23 +498,22 @@ def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], su
             r.get("choice_answer_two", ""),
             r.get("choice_answer_three", ""),
             r.get("choice_answer_four", ""),
-            r.get("choice_answer_five", ""),
             r.get("correct_answers", ""),
-            r.get("tag1", ""),        # ← FIX: Use tag1 from data
-            r.get("tag2", ""),        # ← FIX: Use tag2 from data
+            r.get("tag1", ""),
+            r.get("tag2", ""),
         ]
         for col, value in enumerate(data_row):
             ws.write(row_idx, col, value, data_fmt)
     
-    # Set column widths
-    ws.set_column(0, 0, 20)
-    ws.set_column(1, 1, 12)
-    ws.set_column(2, 2, 20)
-    ws.set_column(3, 3, 10)
-    ws.set_column(4, 4, 12)
-    ws.set_column(5, 9, 15)
-    ws.set_column(10, 10, 12)
-    ws.set_column(11, 12, 15)
+    # Set column widths (12 columns total: 0-11)
+    ws.set_column(0, 0, 20)  # question
+    ws.set_column(1, 1, 12)  # type
+    ws.set_column(2, 2, 20)  # answer description
+    ws.set_column(3, 3, 10)  # levels
+    ws.set_column(4, 4, 12)  # total options
+    ws.set_column(5, 8, 15)  # choice_answer_one through four (columns 5-8)
+    ws.set_column(9, 9, 12)  # correct answers
+    ws.set_column(10, 11, 15)  # tag1, tag2
     
     # Set row heights
     ws.set_row(0, 18)
