@@ -2,6 +2,7 @@
 """
 Query expansion utility for handling abbreviations in search queries.
 Expands common abbreviations to include their full forms to improve RAG retrieval.
+Also integrates with query normalization for singular/plural and synonyms.
 """
 
 import re
@@ -9,6 +10,14 @@ import logging
 from typing import Dict, Set
 
 logger = logging.getLogger(__name__)
+
+# Import query normalizer
+try:
+    from .query_normalizer import normalize_query as normalize_query_terms, expand_with_synonyms
+    NORMALIZER_AVAILABLE = True
+except ImportError:
+    NORMALIZER_AVAILABLE = False
+    logger.warning("[QUERY_EXPANSION] Query normalizer not available. Abbreviation expansion only.")
 
 # Common abbreviation mappings (case-insensitive)
 ABBREVIATION_MAP: Dict[str, str] = {
@@ -144,6 +153,26 @@ def expand_query(query_text: str) -> str:
     # Log expansion if it happened
     if expanded_abbrevs:
         logger.debug(f"[QUERY_EXPANSION] Expanded abbreviations: {expanded_abbrevs} in query: '{query_text[:50]}...'")
+    
+    # Apply normalization (singular/plural, synonyms) if available
+    if NORMALIZER_AVAILABLE and expanded_query != query_text:
+        # Only normalize if we already expanded abbreviations (to avoid double processing)
+        try:
+            normalized = normalize_query_terms(expanded_query, include_synonyms=True)
+            if normalized != expanded_query:
+                logger.debug(f"[QUERY_EXPANSION] Normalized query: '{expanded_query[:50]}...' -> '{normalized[:80]}...'")
+                return normalized
+        except Exception as e:
+            logger.warning(f"[QUERY_EXPANSION] Error in normalization: {e}")
+    elif NORMALIZER_AVAILABLE:
+        # If no abbreviation expansion, apply normalization to original query
+        try:
+            normalized = normalize_query_terms(query_text, include_synonyms=True)
+            if normalized != query_text:
+                logger.debug(f"[QUERY_EXPANSION] Normalized query: '{query_text[:50]}...' -> '{normalized[:80]}...'")
+                return normalized
+        except Exception as e:
+            logger.warning(f"[QUERY_EXPANSION] Error in normalization: {e}")
     
     return expanded_query
 
