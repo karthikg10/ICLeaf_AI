@@ -110,8 +110,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             ensure_storage_dir()
             flashcard_config_dict = request.contentConfig.get('flashcard')
             flashcard_config = FlashcardConfig(
-                front=flashcard_config_dict.get('front', ''),
-                back=flashcard_config_dict.get('back', ''),
+                num_cards=flashcard_config_dict.get('num_cards', 5),
                 difficulty=flashcard_config_dict.get('difficulty', 'medium')
             )
             generated_content = await generate_flashcard_content(request, flashcard_config)
@@ -128,7 +127,7 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
                 question_types=quiz_config_dict.get('question_types', ['multiple_choice'])
             )
             rows = await generate_quiz_table(request, quiz_config)
-            xlsx_path = _write_quiz_csv_xlsx(storage_path, rows, base_filename=base_filename)
+            xlsx_path = _write_quiz_csv_xlsx(storage_path, rows, base_filename=base_filename, quiz_config=quiz_config)
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "assessment" and request.contentConfig.get('assessment'):

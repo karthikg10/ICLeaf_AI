@@ -2,7 +2,7 @@
 # Educational content generation: flashcards, quiz, assessment
 import os
 import json
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union, Optional
 import xlsxwriter
 from .models import GenerateContentRequest, FlashcardConfig, QuizConfig, AssessmentConfig
 from . import deps
@@ -16,7 +16,7 @@ async def generate_flashcard_content(request: GenerateContentRequest, config: Fl
     """Generate flashcard content in a clean table format."""
     print(f"[DEBUG] generate_flashcard_content called with config: {config}")
     print(f"[DEBUG] config type: {type(config)}")
-    print(f"[DEBUG] config.front: {config.front}")
+    print(f"[DEBUG] config.num_cards: {config.num_cards}")
     
     if not content_client:
         raise Exception("OpenAI client not configured")
@@ -27,7 +27,7 @@ async def generate_flashcard_content(request: GenerateContentRequest, config: Fl
     rag_context = rag_result.context
     
     system_prompt = f"""You are an educational content generator. Create flashcards in a clean table format with the following specifications:
-- Create 5-8 flashcards based on the topic
+- Create exactly {config.num_cards} flashcards based on the topic
 - Each flashcard should have a KEY (term/concept) and Description (explanation)
 - Format as a clean table with two columns: KEY and Description
 - Difficulty: {config.difficulty}
@@ -58,11 +58,10 @@ Format the output as a clean table like this:
 Make sure the table is well-structured and easy to read."""
     
     user_prompt = f"""Create flashcards based on: {request.prompt}
-Front: {config.front}
-Back: {config.back}
+Number of cards: {config.num_cards}
 Difficulty: {config.difficulty}
 
-Generate 5-8 flashcards in a clean table format with KEY and Description columns."""
+Generate exactly {config.num_cards} flashcards in a clean table format with KEY and Description columns."""
     
     response = content_client.chat.completions.create(
         model=deps.OPENAI_MODEL,
@@ -126,10 +125,38 @@ async def generate_quiz_content(request: GenerateContentRequest, config: QuizCon
     if not content_client:
         raise Exception("OpenAI client not configured")
     
-    system_prompt = f"""You are an educational quiz generator. Create a quiz in a structured table format with the following specifications:
+    # Determine if we need to handle true/false questions
+    has_true_false = "true_false" in config.question_types
+    has_multiple_choice = "multiple_choice" in config.question_types
+    is_mixed = has_true_false and has_multiple_choice
+    
+    if has_true_false and not has_multiple_choice:
+        # Only true/false questions - 2 options
+        system_prompt = f"""You are an educational quiz generator. Create a quiz in a structured table format with the following specifications:
 - Number of questions: {config.num_questions}
 - Difficulty: {config.difficulty}
-- Question types: {', '.join(config.question_types)}
+- Question types: True/False only
+- User role: {request.role}
+
+Format the output as a structured table with these columns:
+| S.No. | QUESTION | CORRECT ANSWER | ANSWER DESC | ANSWER 1 | ANSWER 2 |
+
+Where:
+- S.No.: Serial number (1, 2, 3, etc.)
+- QUESTION: The quiz question (must be a statement that can be answered as True or False)
+- CORRECT ANSWER: The number (1 or 2) indicating which answer is correct (1 = True, 2 = False)
+- ANSWER DESC: Brief explanation of why the correct answer is right
+- ANSWER 1: "True"
+- ANSWER 2: "False"
+
+Make sure each question has exactly 2 answer choices (True and False) and the correct answer number corresponds to one of them."""
+    else:
+        # Multiple choice or mixed - 4 options
+        question_type_desc = "Mixed (Multiple Choice and True/False)" if is_mixed else "Multiple Choice"
+        system_prompt = f"""You are an educational quiz generator. Create a quiz in a structured table format with the following specifications:
+- Number of questions: {config.num_questions}
+- Difficulty: {config.difficulty}
+- Question types: {question_type_desc}
 - User role: {request.role}
 
 Format the output as a structured table with these columns:
@@ -142,6 +169,7 @@ Where:
 - ANSWER DESC: Brief explanation of why the correct answer is right
 - ANSWER 1-4: Four multiple choice options
 
+{"For True/False questions in mixed mode, use ANSWER 1 = 'True' and ANSWER 2 = 'False', and ANSWER 3 = 'NA', ANSWER 4 = 'NA'." if is_mixed else ""}
 Make sure each question has exactly 4 answer choices and the correct answer number corresponds to one of them."""
     
     user_prompt = f"""Create a quiz based on: {request.prompt}
@@ -173,18 +201,83 @@ async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfi
     validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
 
-    keys = [
-        "s_no","question","correct_answer","answer_desc","answer_1","answer_2","answer_3","answer_4"
-    ]
+    # Determine question type handling
+    has_true_false = "true_false" in config.question_types
+    has_multiple_choice = "multiple_choice" in config.question_types
+    is_mixed = has_true_false and has_multiple_choice
+    is_only_true_false = has_true_false and not has_multiple_choice
 
-    system_prompt = (
-        "You generate quiz rows for CSV/XLSX export. Return ONLY JSON array (no markdown) "
-        "with objects using EXACT keys: " + ",".join(keys) + ". "
-        "'s_no' starts at 1 and increments. 'correct_answer' is 1-4. "
-        "'answer_desc' is a brief explanation of why the correct answer is right (20-50 words). "
-        f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}. "
-        "Generate realistic, educational content."
-    )
+    # Set keys based on question type
+    if is_only_true_false:
+        # Only true/false - no answer_3 and answer_4
+        keys = [
+            "s_no","question","correct_answer","answer_desc","answer_1","answer_2"
+        ]
+    else:
+        # Multiple choice or mixed - include all 4 answers
+        keys = [
+            "s_no","question","correct_answer","answer_desc","answer_1","answer_2","answer_3","answer_4"
+        ]
+
+    if is_only_true_false:
+        # Only true/false questions - 2 options (no answer_3 or answer_4)
+        system_prompt = (
+            "You generate quiz rows for CSV/XLSX export. Return ONLY JSON array (no markdown) "
+            "with objects using EXACT keys: " + ",".join(keys) + ". "
+            "'s_no' starts at 1 and increments. 'correct_answer' is 1 or 2 (1 = True, 2 = False). "
+            "'answer_desc' is a brief explanation of why the correct answer is right (20-50 words). "
+            f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}. "
+            "All questions must be True/False format. "
+            "For each question: answer_1 must be 'True', answer_2 must be 'False'. "
+            "Do NOT include answer_3 or answer_4 keys in the JSON objects. "
+            "Generate realistic, educational content."
+        )
+        user_prompt = (
+            f"Create quiz rows for: {request.prompt}. "
+            f"Keep questions concise and unambiguous. "
+            f"For each row, provide: s_no, question (must be a statement that can be answered True/False), "
+            f"correct_answer (1 for True, 2 for False), answer_desc (why the answer is correct), "
+            f"answer_1 = 'True', answer_2 = 'False'. "
+            f"Do NOT include answer_3 or answer_4. "
+            f"Make it realistic and educational."
+        )
+    elif is_mixed:
+        # Mixed: multiple choice and true/false
+        system_prompt = (
+            "You generate quiz rows for CSV/XLSX export. Return ONLY JSON array (no markdown) "
+            "with objects using EXACT keys: " + ",".join(keys) + ". "
+            "'s_no' starts at 1 and increments. 'correct_answer' is 1-4 for multiple choice, 1-2 for true/false. "
+            "'answer_desc' is a brief explanation of why the correct answer is right (20-50 words). "
+            f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}. "
+            "Mix multiple choice questions (with 4 options) and true/false questions (answer_1='True', answer_2='False', answer_3='NA', answer_4='NA'). "
+            "Generate realistic, educational content."
+        )
+        user_prompt = (
+            f"Create quiz rows for: {request.prompt}. "
+            f"Keep questions concise and unambiguous. "
+            f"Mix multiple choice questions (4 answer options) and true/false questions (answer_1='True', answer_2='False', answer_3='NA', answer_4='NA'). "
+            f"For each row, provide: s_no, question, correct_answer (1-4 for multiple choice, 1-2 for true/false), "
+            f"answer_desc (why the answer is correct), and appropriate answer choices. "
+            f"Make it realistic and educational."
+        )
+    else:
+        # Only multiple choice - 4 options
+        system_prompt = (
+            "You generate quiz rows for CSV/XLSX export. Return ONLY JSON array (no markdown) "
+            "with objects using EXACT keys: " + ",".join(keys) + ". "
+            "'s_no' starts at 1 and increments. 'correct_answer' is 1-4. "
+            "'answer_desc' is a brief explanation of why the correct answer is right (20-50 words). "
+            f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}. "
+            "All questions must be multiple choice with 4 options. "
+            "Generate realistic, educational content."
+        )
+        user_prompt = (
+            f"Create quiz rows for: {request.prompt}. "
+            f"Keep questions concise and unambiguous. "
+            f"For each row, provide: s_no, question, correct_answer (1-4), "
+            f"answer_desc (why the answer is correct), and 4 answer choices. "
+            f"Make it realistic and educational."
+        )
     
     if rag_context:
         system_prompt += f"""
@@ -199,14 +292,6 @@ Instructions:
 - Ensure questions and answers are factually accurate to the source material
 - Use specific details from the documents
 - If the context doesn't cover the topic fully, create questions based on what is available"""
-
-    user_prompt = (
-        f"Create quiz rows for: {request.prompt}. "
-        f"Keep questions concise and unambiguous. "
-        f"For each row, provide: s_no, question, correct_answer (1-4), "
-        f"answer_desc (why the answer is correct), and 4 answer choices. "
-        f"Make it realistic and educational."
-    )
 
     response = content_client.chat.completions.create(
         model=deps.OPENAI_MODEL,
@@ -228,6 +313,7 @@ Instructions:
     rows: List[Dict[str, Union[str, int]]] = []
     for row in data:
         norm: Dict[str, Union[str, int]] = {}
+        # Only include keys that are in the expected keys list
         for k in keys:
             value = row.get(k, "")
             if k == "s_no":
@@ -246,25 +332,67 @@ Instructions:
                 # Convert to string
                 norm[k] = str(value) if value else ""
         rows.append(norm)
+    
+    # Post-process: For mixed mode, fill empty answer_3 and answer_4 with "NA" for true/false questions
+    if is_mixed:
+        for row in rows:
+            answer_1 = str(row.get("answer_1", "")).strip()
+            answer_2 = str(row.get("answer_2", "")).strip()
+            answer_3 = str(row.get("answer_3", "")).strip()
+            answer_4 = str(row.get("answer_4", "")).strip()
+            
+            # Detect true/false question: answer_1 is "True" and answer_2 is "False"
+            is_true_false = (answer_1.lower() == "true" and answer_2.lower() == "false")
+            
+            if is_true_false:
+                # Fill empty answer_3 and answer_4 with "NA"
+                if not answer_3 or answer_3 == "":
+                    row["answer_3"] = "NA"
+                if not answer_4 or answer_4 == "":
+                    row["answer_4"] = "NA"
+    
     return rows
 
 
-def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]]], base_filename: str = "quiz") -> str:
+def _write_quiz_csv_xlsx(storage_path: str, rows: List[Dict[str, Union[str, int]]], base_filename: str = "quiz", quiz_config: Optional[QuizConfig] = None) -> str:
     """Write quiz rows to XLSX with the specified headers order including ANSWER DESC."""
-    headers = [
-        "S.No.", "QUESTION", "CORRECT ANSWER", "ANSWER DESC",
-        "ANSWER 1", "ANSWER 2", "ANSWER 3", "ANSWER 4"
-    ]
-    key_map = {
-        "S.No.": "s_no",
-        "QUESTION": "question",
-        "CORRECT ANSWER": "correct_answer",
-        "ANSWER DESC": "answer_desc",
-        "ANSWER 1": "answer_1",
-        "ANSWER 2": "answer_2",
-        "ANSWER 3": "answer_3",
-        "ANSWER 4": "answer_4",
-    }
+    # Determine if we should include ANSWER 3 and ANSWER 4 columns
+    is_only_true_false = False
+    if quiz_config:
+        has_true_false = "true_false" in quiz_config.question_types
+        has_multiple_choice = "multiple_choice" in quiz_config.question_types
+        is_only_true_false = has_true_false and not has_multiple_choice
+    
+    if is_only_true_false:
+        # True/false only - exclude ANSWER 3 and ANSWER 4
+        headers = [
+            "S.No.", "QUESTION", "CORRECT ANSWER", "ANSWER DESC",
+            "ANSWER 1", "ANSWER 2"
+        ]
+        key_map = {
+            "S.No.": "s_no",
+            "QUESTION": "question",
+            "CORRECT ANSWER": "correct_answer",
+            "ANSWER DESC": "answer_desc",
+            "ANSWER 1": "answer_1",
+            "ANSWER 2": "answer_2",
+        }
+    else:
+        # Multiple choice or mixed - include all columns
+        headers = [
+            "S.No.", "QUESTION", "CORRECT ANSWER", "ANSWER DESC",
+            "ANSWER 1", "ANSWER 2", "ANSWER 3", "ANSWER 4"
+        ]
+        key_map = {
+            "S.No.": "s_no",
+            "QUESTION": "question",
+            "CORRECT ANSWER": "correct_answer",
+            "ANSWER DESC": "answer_desc",
+            "ANSWER 1": "answer_1",
+            "ANSWER 2": "answer_2",
+            "ANSWER 3": "answer_3",
+            "ANSWER 4": "answer_4",
+        }
 
     xlsx_path = os.path.join(storage_path, f"{base_filename}.xlsx")
 

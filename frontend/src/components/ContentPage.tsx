@@ -79,14 +79,13 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
   
   // Content configs
   const [flashcardConfig, setFlashcardConfig] = useState({
-    front: "",
-    back: "",
+    num_cards: 5,
     difficulty: "medium" as "easy" | "medium" | "hard"
   });
   const [quizConfig, setQuizConfig] = useState({
     num_questions: 5,
     difficulty: "medium" as "easy" | "medium" | "hard",
-    question_types: ["multiple_choice", "true_false"] as string[]
+    question_type: "mixed" as "multiple_choice" | "true_false" | "mixed"
   });
   const [assessmentConfig] = useState({
     duration_minutes: 30,
@@ -164,7 +163,14 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
           contentConfig.flashcard = flashcardConfig;
           break;
         case "quiz":
-          contentConfig.quiz = quizConfig;
+          // Convert question_type to question_types array for backend
+          const questionTypes = quizConfig.question_type === "mixed" 
+            ? ["multiple_choice", "true_false"]
+            : [quizConfig.question_type];
+          contentConfig.quiz = {
+            ...quizConfig,
+            question_types: questionTypes
+          };
           break;
         case "assessment":
           contentConfig.assessment = assessmentConfig;
@@ -591,13 +597,15 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                 <div>
                   <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-                    Front Text
+                    Number of Cards
                   </label>
                   <input
-                    type="text"
-                    value={flashcardConfig.front}
-                    onChange={(e) => setFlashcardConfig({...flashcardConfig, front: e.target.value})}
-                    placeholder="What's on the front?"
+                    type="number"
+                    min="1"
+                    max="50"
+                    value={flashcardConfig.num_cards}
+                    onChange={(e) => setFlashcardConfig({...flashcardConfig, num_cards: parseInt(e.target.value) || 5})}
+                    placeholder="Number of flashcards"
                     style={{
                       width: "100%",
                       padding: 8,
@@ -609,13 +617,11 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                 </div>
                 <div>
                   <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-                    Back Text
+                    Difficulty
                   </label>
-                  <input
-                    type="text"
-                    value={flashcardConfig.back}
-                    onChange={(e) => setFlashcardConfig({...flashcardConfig, back: e.target.value})}
-                    placeholder="What's on the back?"
+                  <select
+                    value={flashcardConfig.difficulty}
+                    onChange={(e) => setFlashcardConfig({...flashcardConfig, difficulty: e.target.value as any})}
                     style={{
                       width: "100%",
                       padding: 8,
@@ -623,27 +629,12 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                       borderRadius: 4,
                       fontSize: 14,
                     }}
-                  />
+                  >
+                    <option value="easy">Easy</option>
+                    <option value="medium">Medium</option>
+                    <option value="hard">Hard</option>
+                  </select>
                 </div>
-              </div>
-              <div style={{ marginTop: 16 }}>
-                <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-                  Difficulty
-                </label>
-                <select
-                  value={flashcardConfig.difficulty}
-                  onChange={(e) => setFlashcardConfig({...flashcardConfig, difficulty: e.target.value as any})}
-                  style={{
-                    padding: 8,
-                    border: "1px solid #ccc",
-                    borderRadius: 4,
-                    fontSize: 14,
-                  }}
-                >
-                  <option value="easy">Easy</option>
-                  <option value="medium">Medium</option>
-                  <option value="hard">Hard</option>
-                </select>
               </div>
             </div>
           )}
@@ -659,7 +650,7 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
               <h3 style={{ margin: "0 0 16px", fontSize: 18, fontWeight: 600 }}>
                 Quiz Configuration
               </h3>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
                 <div>
                   <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
                     Number of Questions
@@ -678,6 +669,26 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                       fontSize: 14,
                     }}
                   />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                    Question Type
+                  </label>
+                  <select
+                    value={quizConfig.question_type}
+                    onChange={(e) => setQuizConfig({...quizConfig, question_type: e.target.value as any})}
+                    style={{
+                      width: "100%",
+                      padding: 8,
+                      border: "1px solid #ccc",
+                      borderRadius: 4,
+                      fontSize: 14,
+                    }}
+                  >
+                    <option value="multiple_choice">Multiple Choice</option>
+                    <option value="true_false">True/False</option>
+                    <option value="mixed">Mixed</option>
+                  </select>
                 </div>
                 <div>
                   <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>

@@ -253,8 +253,7 @@ ContentType = Literal["pdf", "ppt", "flashcard", "quiz", "assessment", "video", 
 ContentStatus = Literal["pending", "completed", "failed"]
 
 class FlashcardConfig(BaseModel):
-    front: str
-    back: str
+    num_cards: int = 5
     difficulty: str = "medium"  # "easy", "medium", "hard"
 
 class QuizConfig(BaseModel):
