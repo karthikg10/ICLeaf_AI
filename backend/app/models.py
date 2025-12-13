@@ -262,7 +262,7 @@ class QuizConfig(BaseModel):
     question_types: List[str] = ["multiple_choice", "true_false"]  # "multiple_choice", "true_false", "short_answer"
 
 class AssessmentConfig(BaseModel):
-    duration_minutes: int = 30
+    num_questions: int = 5
     difficulty: str = "medium"
     question_types: List[str] = ["multiple_choice", "essay"]
     passing_score: int = 70

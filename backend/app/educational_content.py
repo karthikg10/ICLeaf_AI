@@ -429,7 +429,7 @@ async def generate_assessment_content(request: GenerateContentRequest, config: A
     
     # Generate the assessment content
     system_prompt = f"""You are an educational assessment generator. Create an assessment with the following specifications:
-- Duration: {config.duration_minutes} minutes
+- Number of questions: {config.num_questions}
 - Difficulty: {config.difficulty}
 - Question types: {', '.join(config.question_types)}
 - Passing score: {config.passing_score}%
@@ -437,7 +437,7 @@ async def generate_assessment_content(request: GenerateContentRequest, config: A
 - Make it comprehensive and aligned with learning objectives"""
     
     user_prompt = f"""Create an assessment based on: {request.prompt}
-Duration: {config.duration_minutes} minutes
+Number of questions: {config.num_questions}
 Difficulty: {config.difficulty}
 Question types: {', '.join(config.question_types)}
 Passing score: {config.passing_score}%
@@ -465,35 +465,57 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
     validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
+    # Determine question type handling
+    has_multiple_choice = "multiple_choice" in config.question_types
+    has_true_false = "true_false" in config.question_types
+    has_essay = "essay" in config.question_types
+    is_mixed = len(config.question_types) > 1
+    
     columns = [
         "question", "type", "answer_description", "levels", "total_options",
         "choice_answer_one", "choice_answer_two", "choice_answer_three", 
         "choice_answer_four", "correct_answers", "tag1", "tag2"
     ]
+    
+    # Build type instructions based on question types
+    type_instructions = []
+    if has_multiple_choice:
+        type_instructions.append("'Choice' (multiple choice with 4 options)")
+    if has_true_false:
+        type_instructions.append("'TrueFalse' (true/false with 2 options: True/False)")
+    if has_essay:
+        type_instructions.append("'Essay' (essay questions - leave choice_answer fields empty or use for sample answers)")
+    
+    type_desc = ", ".join(type_instructions) if type_instructions else "'Choice'"
+    
     system_prompt = (
         "You generate assessment rows for CSV/XLSX export. "
         "Return ONLY valid JSON array (no markdown) with EXACTLY these keys: " + ",".join(columns) + ". "
         
         "RULES:\n"
         "1. 'question': Question text (can include #{IMG}, #{VID}, #{FILL})\n"
-        "2. 'type': 'Choice', 'FillUp', or 'Match'\n"
-        "3. 'answer_description': Brief explanation\n"
+        f"2. 'type': One of {type_desc}\n"
+        "3. 'answer_description': Brief explanation or sample answer\n"
         "4. 'levels': 'Easy', 'Medium', or 'Difficult'\n"
-        "5. 'total_options': Number of options - ALWAYS set to 4 for ALL question types\n"
+        "5. 'total_options': Number of options\n"
         "   - For 'Choice': Always set to 4 (exactly 4 multiple choice options)\n"
-        "   - For 'FillUp': Always set to 4 (exactly 4 answer options)\n"
-        "   - For 'Match': Always set to 4 (exactly 4 matching pairs)\n"
-        "6. 'choice_answer_one' to 'choice_answer_four': The answer options (exactly 4 options)\n"
+        "   - For 'TrueFalse': Always set to 2 (True and False)\n"
+        "   - For 'Essay': Set to 0 or leave empty (no multiple choice options)\n"
+        "6. 'choice_answer_one' to 'choice_answer_four': The answer options\n"
         "   - For 'Choice': Provide exactly 4 multiple choice options\n"
-        "   - For 'FillUp': Provide exactly 4 answer options (one for each blank)\n"
-        "   - For 'Match': Provide the matching pairs\n"
-        "7. 'correct_answers': '1' or '1,2' for Choice; answer text for FillUp; 'a=1,b=2,c=3' for Match\n"
+        "   - For 'TrueFalse': Provide 'True' in choice_answer_one, 'False' in choice_answer_two, leave others empty\n"
+        "   - For 'Essay': Leave empty or provide sample answer points\n"
+        "7. 'correct_answers': '1' or '1,2' for Choice; '1' or '2' for TrueFalse; leave empty for Essay\n"
         "8. 'tag1', 'tag2': Tags\n\n"
         
-        "CRITICAL: For ALL question types (Choice, FillUp, Match), 'total_options' MUST be 4, and you MUST provide exactly 4 options in choice_answer_one through choice_answer_four.\n\n"
-        
-        f"Create exactly 4 rows. Difficulty: {config.difficulty}."
+        f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}.\n"
     )
+    
+    if is_mixed:
+        system_prompt += (
+            f"IMPORTANT: Mix the question types ({', '.join(config.question_types)}). "
+            f"Distribute them evenly across the {config.num_questions} questions.\n\n"
+        )
     
     if rag_context:
         system_prompt += f"""
@@ -510,11 +532,13 @@ Instructions:
 - If the context doesn't cover the topic fully, create questions based on what is available"""
     
     user_prompt = (
-        f"Create 4 assessment rows for: {request.prompt}\n"
+        f"Create {config.num_questions} assessment rows for: {request.prompt}\n"
         f"Subject: {request.subjectName or ''}\n"
         f"Topic: {request.topicName or ''}\n"
-        f"Duration: {config.duration_minutes} minutes\n"
+        f"Number of questions: {config.num_questions}\n"
+        f"Question types: {', '.join(config.question_types)}\n"
         f"Difficulty: {config.difficulty}\n"
+        f"Passing score: {config.passing_score}%\n"
     )
     response = content_client.chat.completions.create(
         model=deps.OPENAI_MODEL,
@@ -540,11 +564,35 @@ Instructions:
             value = row.get(col, "")
             norm[col] = str(value) if value else ""
         
-        # Ensure ALL question types have exactly 4 total_options
-        question_type = norm.get("type", "").strip().lower()
-        if question_type in ["choice", "fillup", "match"]:
+        # Ensure question types have correct total_options
+        question_type = norm.get("type", "").strip()
+        question_type_lower = question_type.lower()
+        
+        if question_type_lower in ["choice", "fillup", "match"]:
             norm["total_options"] = "4"
             # Ensure all 4 choice answers exist (even if empty)
+            if "choice_answer_one" not in norm:
+                norm["choice_answer_one"] = ""
+            if "choice_answer_two" not in norm:
+                norm["choice_answer_two"] = ""
+            if "choice_answer_three" not in norm:
+                norm["choice_answer_three"] = ""
+            if "choice_answer_four" not in norm:
+                norm["choice_answer_four"] = ""
+        elif question_type_lower in ["truefalse", "true_false"]:
+            norm["total_options"] = "2"
+            # Ensure True/False options
+            if "choice_answer_one" not in norm or not norm["choice_answer_one"]:
+                norm["choice_answer_one"] = "True"
+            if "choice_answer_two" not in norm or not norm["choice_answer_two"]:
+                norm["choice_answer_two"] = "False"
+            if "choice_answer_three" not in norm:
+                norm["choice_answer_three"] = ""
+            if "choice_answer_four" not in norm:
+                norm["choice_answer_four"] = ""
+        elif question_type_lower == "essay":
+            norm["total_options"] = "0"
+            # Essay questions don't need choice answers, but ensure fields exist
             if "choice_answer_one" not in norm:
                 norm["choice_answer_one"] = ""
             if "choice_answer_two" not in norm:
@@ -556,14 +604,149 @@ Instructions:
         
         norm_rows.append(norm)
     
+    # Post-process for mixed mode: Fill empty cells with NA for true/false and essay
+    has_multiple_choice = "multiple_choice" in config.question_types
+    has_true_false = "true_false" in config.question_types
+    has_essay = "essay" in config.question_types
+    is_mixed = len(config.question_types) > 1
+    
+    if is_mixed:
+        for row in norm_rows:
+            qtype = row.get("type", "").strip().lower()
+            
+            if qtype in ["truefalse", "true_false"]:
+                # Fill choice_answer_three and choice_answer_four with NA
+                if not row.get("choice_answer_three") or row.get("choice_answer_three") == "":
+                    row["choice_answer_three"] = "NA"
+                if not row.get("choice_answer_four") or row.get("choice_answer_four") == "":
+                    row["choice_answer_four"] = "NA"
+            
+            elif qtype == "essay":
+                # Fill total_options, choice answers, and correct_answers with NA
+                if not row.get("total_options") or row.get("total_options") == "":
+                    row["total_options"] = "NA"
+                if not row.get("choice_answer_one") or row.get("choice_answer_one") == "":
+                    row["choice_answer_one"] = "NA"
+                if not row.get("choice_answer_two") or row.get("choice_answer_two") == "":
+                    row["choice_answer_two"] = "NA"
+                if not row.get("choice_answer_three") or row.get("choice_answer_three") == "":
+                    row["choice_answer_three"] = "NA"
+                if not row.get("choice_answer_four") or row.get("choice_answer_four") == "":
+                    row["choice_answer_four"] = "NA"
+                if not row.get("correct_answers") or row.get("correct_answers") == "":
+                    row["correct_answers"] = "NA"
+    
     return norm_rows
 
 
-def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], subject_name: str = "", topic_name: str = "", base_filename: str = "assessment") -> str:
+def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], subject_name: str = "", topic_name: str = "", base_filename: str = "assessment", assessment_config: Optional[AssessmentConfig] = None) -> str:
     """Write assessment rows in exact template format to XLSX."""
     
     xlsx_path = os.path.join(storage_path, f"{base_filename}.xlsx")
 
+    # Determine question types from config or rows
+    has_multiple_choice = False
+    has_true_false = False
+    has_essay = False
+    is_mixed = False
+    
+    if assessment_config:
+        has_multiple_choice = "multiple_choice" in assessment_config.question_types
+        has_true_false = "true_false" in assessment_config.question_types
+        has_essay = "essay" in assessment_config.question_types
+        is_mixed = len(assessment_config.question_types) > 1
+    else:
+        # Infer from rows
+        question_types_in_rows = set()
+        for row in rows:
+            qtype = row.get("type", "").strip().lower()
+            if qtype in ["choice", "fillup", "match"]:
+                question_types_in_rows.add("multiple_choice")
+            elif qtype in ["truefalse", "true_false"]:
+                question_types_in_rows.add("true_false")
+            elif qtype == "essay":
+                question_types_in_rows.add("essay")
+        has_multiple_choice = "multiple_choice" in question_types_in_rows
+        has_true_false = "true_false" in question_types_in_rows
+        has_essay = "essay" in question_types_in_rows
+        is_mixed = len(question_types_in_rows) > 1
+    
+    # Determine which columns to include
+    is_essay_only = has_essay and not has_multiple_choice and not has_true_false
+    is_true_false_only = has_true_false and not has_multiple_choice and not has_essay
+    
+    # Base columns (always included)
+    base_columns = ["question", "type", "answer_description", "levels"]
+    base_labels = ["type", "answer description", "levels"]
+    
+    # Optional columns
+    include_total_options = not is_essay_only
+    include_choice_one = not is_essay_only
+    include_choice_two = not is_essay_only
+    include_choice_three = not is_essay_only and not is_true_false_only
+    include_choice_four = not is_essay_only and not is_true_false_only
+    include_correct_answers = not is_essay_only
+    include_tags = True  # Always include tags
+    
+    # Build column list and labels
+    columns = base_columns.copy()
+    labels = base_labels.copy()
+    column_map = {
+        "question": 0,
+        "type": 1,
+        "answer_description": 2,
+        "levels": 3
+    }
+    col_idx = 4
+    
+    if include_total_options:
+        columns.append("total_options")
+        labels.append("total options")
+        column_map["total_options"] = col_idx
+        col_idx += 1
+    
+    if include_choice_one:
+        columns.append("choice_answer_one")
+        labels.append("choice answer one")
+        column_map["choice_answer_one"] = col_idx
+        col_idx += 1
+    
+    if include_choice_two:
+        columns.append("choice_answer_two")
+        labels.append("choice answer two")
+        column_map["choice_answer_two"] = col_idx
+        col_idx += 1
+    
+    if include_choice_three:
+        columns.append("choice_answer_three")
+        labels.append("choice answer three")
+        column_map["choice_answer_three"] = col_idx
+        col_idx += 1
+    
+    if include_choice_four:
+        columns.append("choice_answer_four")
+        labels.append("choice answer four")
+        column_map["choice_answer_four"] = col_idx
+        col_idx += 1
+    
+    if include_correct_answers:
+        columns.append("correct_answers")
+        labels.append("correct answers")
+        column_map["correct_answers"] = col_idx
+        col_idx += 1
+    
+    if include_tags:
+        columns.append("tag1")
+        labels.append("tag1")
+        column_map["tag1"] = col_idx
+        col_idx += 1
+        columns.append("tag2")
+        labels.append("tag2")
+        column_map["tag2"] = col_idx
+        col_idx += 1
+    
+    num_cols = len(columns)
+    
     # XLSX Format
     workbook = xlsxwriter.Workbook(xlsx_path)
     ws = workbook.add_worksheet("Sheet1")
@@ -590,58 +773,33 @@ def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], su
         "text_wrap": True
     })
     
-    # Row 1: Subject header (12 columns total: question + 11 others)
+    # Row 1: Subject header (merged across all columns)
     ws.write(0, 0, subject_name, subject_fmt)
-    for col in range(1, 12):
+    for col in range(1, num_cols):
         ws.write(0, col, '', subject_fmt)
     
-    # Row 2: Column labels - all 12 columns
+    # Row 2: Column labels
     ws.write(1, 0, topic_name, label_fmt)
-    labels = [
-        "type", 
-        "answer description", 
-        "levels", 
-        "total options",
-        "choice answer one",
-        "choice answer two", 
-        "choice answer three",
-        "choice answer four",
-        "correct answers",
-        "tag1",
-        "tag2"
-    ]
     for col, label in enumerate(labels, start=1):
         ws.write(1, col, label, label_fmt)
     
     # Rows 3+: Data
     for row_idx, r in enumerate(rows, start=2):
-        # Only 4 choice answers (one through four)
-        data_row = [
-            r.get("question", ""),
-            r.get("type", ""),
-            r.get("answer_description", ""),
-            r.get("levels", ""),
-            r.get("total_options", ""),
-            r.get("choice_answer_one", ""),
-            r.get("choice_answer_two", ""),
-            r.get("choice_answer_three", ""),
-            r.get("choice_answer_four", ""),
-            r.get("correct_answers", ""),
-            r.get("tag1", ""),
-            r.get("tag2", ""),
-        ]
+        data_row = [""] * num_cols
+        data_row[0] = r.get("question", "")
+        
+        for col_name in columns[1:]:  # Skip question (already set)
+            if col_name in column_map:
+                col_pos = column_map[col_name]
+                value = r.get(col_name, "")
+                data_row[col_pos] = value
+        
         for col, value in enumerate(data_row):
             ws.write(row_idx, col, value, data_fmt)
     
-    # Set column widths (12 columns total: 0-11)
+    # Set column widths
     ws.set_column(0, 0, 20)  # question
-    ws.set_column(1, 1, 12)  # type
-    ws.set_column(2, 2, 20)  # answer description
-    ws.set_column(3, 3, 10)  # levels
-    ws.set_column(4, 4, 12)  # total options
-    ws.set_column(5, 8, 15)  # choice_answer_one through four (columns 5-8)
-    ws.set_column(9, 9, 12)  # correct answers
-    ws.set_column(10, 11, 15)  # tag1, tag2
+    ws.set_column(1, num_cols - 1, 15)  # other columns
     
     # Set row heights
     ws.set_row(0, 18)

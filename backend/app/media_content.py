@@ -60,9 +60,12 @@ Make it engaging and visually appealing for video viewing."""
     
     script_content = extract_openai_response(response)
     
+    # Create directory only after successful generation, just before writing
+    os.makedirs(storage_path, exist_ok=True)
+    
     # Save script file
+    script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
     try:
-        script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(f"Video Script:\n\n{script_content}\n\n")
             f.write(f"Duration: {config.duration_seconds} seconds\n")
@@ -70,12 +73,14 @@ Make it engaging and visually appealing for video viewing."""
             f.write(f"Subtitles: {config.include_subtitles}\n")
             f.write(f"Generated: {datetime.now().isoformat()}\n")
         return script_path
-            
     except Exception as e:
-        script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
-        with open(script_path, 'w', encoding='utf-8') as f:
-            f.write(f"Error generating video: {str(e)}\n\nScript: {script_content}")
-        return script_path
+        # If writing fails, still try to save error info
+        try:
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(f"Error generating video: {str(e)}\n\nScript: {script_content}")
+        except:
+            pass  # If even error writing fails, just raise the original error
+        raise e
 
 
 async def generate_audio_content(request: GenerateContentRequest, config: AudioConfig, content_id: str, storage_path: str, base_filename: str = "audio") -> str:
@@ -176,15 +181,22 @@ Begin the script now:"""
         # Try a gentler cleanup - just remove obvious markdown formatting
         script_content = original_script.replace('**', '').replace('---', '').strip()
     
+    # Create directory only after successful generation, just before writing
+    os.makedirs(storage_path, exist_ok=True)
+    
     # Save script file
+    script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
     try:
-        script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
         with open(script_path, 'w', encoding='utf-8') as f:
             f.write(script_content)
     except Exception as e:
-        script_path = os.path.join(storage_path, f"{base_filename}_script.txt")
-        with open(script_path, 'w', encoding='utf-8') as f:
-            f.write(f"Error generating audio: {str(e)}\n\nScript: {script_content}")
+        # If writing fails, still try to save error info
+        try:
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(f"Error generating audio: {str(e)}\n\nScript: {script_content}")
+        except:
+            pass  # If even error writing fails, just raise the original error
+        raise e
     
     # Generate MP3 file using TTS
     try:

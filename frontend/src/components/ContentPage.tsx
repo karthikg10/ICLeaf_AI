@@ -87,10 +87,10 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
     difficulty: "medium" as "easy" | "medium" | "hard",
     question_type: "mixed" as "multiple_choice" | "true_false" | "mixed"
   });
-  const [assessmentConfig] = useState({
-    duration_minutes: 30,
+  const [assessmentConfig, setAssessmentConfig] = useState({
+    num_questions: 5,
     difficulty: "medium" as "easy" | "medium" | "hard",
-    question_types: ["multiple_choice", "essay"] as string[],
+    question_type: "mixed" as "multiple_choice" | "true_false" | "essay" | "mixed",
     passing_score: 70
   });
   const [videoConfig] = useState({
@@ -173,7 +173,14 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
           };
           break;
         case "assessment":
-          contentConfig.assessment = assessmentConfig;
+          // Convert question_type to question_types array for backend
+          const assessmentQuestionTypes = assessmentConfig.question_type === "mixed" 
+            ? ["multiple_choice", "true_false", "essay"]
+            : [assessmentConfig.question_type];
+          contentConfig.assessment = {
+            ...assessmentConfig,
+            question_types: assessmentQuestionTypes
+          };
           break;
         case "video":
           contentConfig.video = videoConfig;
@@ -697,6 +704,82 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                   <select
                     value={quizConfig.difficulty}
                     onChange={(e) => setQuizConfig({...quizConfig, difficulty: e.target.value as any})}
+                    style={{
+                      width: "100%",
+                      padding: 8,
+                      border: "1px solid #ccc",
+                      borderRadius: 4,
+                      fontSize: 14,
+                    }}
+                  >
+                    <option value="easy">Easy</option>
+                    <option value="medium">Medium</option>
+                    <option value="hard">Hard</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {contentType === "assessment" && (
+            <div style={{
+              background: "#fff",
+              padding: 20,
+              borderRadius: 8,
+              border: "1px solid #e9ecef",
+              marginBottom: 24,
+            }}>
+              <h3 style={{ margin: "0 0 16px", fontSize: 18, fontWeight: 600 }}>
+                Assessment Configuration
+              </h3>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                    Number of Questions
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="50"
+                    value={assessmentConfig.num_questions}
+                    onChange={(e) => setAssessmentConfig({...assessmentConfig, num_questions: parseInt(e.target.value) || 5})}
+                    style={{
+                      width: "100%",
+                      padding: 8,
+                      border: "1px solid #ccc",
+                      borderRadius: 4,
+                      fontSize: 14,
+                    }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                    Question Type
+                  </label>
+                  <select
+                    value={assessmentConfig.question_type}
+                    onChange={(e) => setAssessmentConfig({...assessmentConfig, question_type: e.target.value as any})}
+                    style={{
+                      width: "100%",
+                      padding: 8,
+                      border: "1px solid #ccc",
+                      borderRadius: 4,
+                      fontSize: 14,
+                    }}
+                  >
+                    <option value="multiple_choice">Multiple Choice</option>
+                    <option value="true_false">True/False</option>
+                    <option value="essay">Essay</option>
+                    <option value="mixed">Mixed</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                    Difficulty
+                  </label>
+                  <select
+                    value={assessmentConfig.difficulty}
+                    onChange={(e) => setAssessmentConfig({...assessmentConfig, difficulty: e.target.value as any})}
                     style={{
                       width: "100%",
                       padding: 8,

@@ -2,6 +2,7 @@
 # PDF generation functions
 import os
 import re
+import tempfile
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -9,6 +10,7 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.lib.enums import TA_LEFT
+from PIL import Image, ImageDraw, ImageFont
 from .models import GenerateContentRequest
 from . import deps
 from .content_utils import (
@@ -20,16 +22,81 @@ from .content_utils import (
 
 def _add_watermark(canvas: Canvas, doc) -> None:
     """Draw a subtle ICLeaF watermark across the page background.
-    The watermark is drawn as part of the page content and is not editable."""
+    The watermark is rendered as an image (not text) to make it unselectable."""
     canvas.saveState()
     width, height = doc.pagesize
-    canvas.translate(width / 2.0, height / 2.0)
-    canvas.rotate(30)
-    canvas.setFont("Helvetica-Bold", 60)
-    canvas.setFillColorRGB(0.88, 0.88, 0.88)  # light gray, unobtrusive
-    # Draw watermark as part of page content (not editable)
-    # Use drawCentredString which renders text as part of the page graphics
-    canvas.drawCentredString(0, 0, "ICLeaF")
+    
+    # Create watermark text as an image to make it unselectable
+    text = "ICLeaF"
+    font_size = 60
+    
+    # Create a transparent image with the watermark text
+    # Use a larger size to ensure good quality
+    img_width, img_height = 300, 100
+    img = Image.new('RGBA', (img_width, img_height), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(img)
+    
+    # Try to use a bold font, fallback to default if not available
+    font = None
+    try:
+        # Try common system font paths
+        font_paths = [
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/Windows/Fonts/arial.ttf",
+        ]
+        for path in font_paths:
+            try:
+                font = ImageFont.truetype(path, font_size)
+                break
+            except:
+                continue
+    except:
+        pass
+    
+    if font is None:
+        try:
+            # Try to load default bold font
+            font = ImageFont.load_default()
+        except:
+            font = None
+    
+    # Get text bounding box to center it
+    if font:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+    else:
+        # Fallback: estimate size
+        text_width = len(text) * font_size * 0.6
+        text_height = font_size
+    
+    # Draw text in light gray (RGB: 224, 224, 224 which is 0.88 in 0-255 scale)
+    text_x = (img_width - text_width) // 2
+    text_y = (img_height - text_height) // 2
+    draw.text((text_x, text_y), text, fill=(224, 224, 224, 180), font=font)  # 180 alpha for subtlety
+    
+    # Save image to a temporary file (ReportLab's drawImage needs a file path or PIL Image)
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+        img.save(tmp_file.name, format='PNG')
+        tmp_path = tmp_file.name
+    
+    try:
+        # Position and rotate the watermark
+        canvas.translate(width / 2.0, height / 2.0)
+        canvas.rotate(30)
+        
+        # Draw the image (centered, accounting for image size)
+        # ReportLab's drawImage can accept a file path
+        canvas.drawImage(tmp_path, -img_width // 2, -img_height // 2, 
+                         width=img_width, height=img_height, mask='auto')
+    finally:
+        # Clean up temporary file
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+    
     canvas.restoreState()
 
 

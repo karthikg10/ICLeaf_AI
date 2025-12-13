@@ -107,7 +107,6 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
         actual_filename = ""
         
         if request.contentType == "flashcard" and request.contentConfig.get('flashcard'):
-            ensure_storage_dir()
             flashcard_config_dict = request.contentConfig.get('flashcard')
             flashcard_config = FlashcardConfig(
                 num_cards=flashcard_config_dict.get('num_cards', 5),
@@ -115,11 +114,12 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
             )
             generated_content = await generate_flashcard_content(request, flashcard_config)
             rows = _parse_markdown_table_to_rows(generated_content)
+            # Create directory only after successful generation, just before writing
+            ensure_storage_dir()
             xlsx_path = _write_flashcards_csv_xlsx(storage_path, rows, base_filename=base_filename)
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "quiz" and request.contentConfig.get('quiz'):
-            ensure_storage_dir()
             quiz_config_dict = request.contentConfig.get('quiz')
             quiz_config = QuizConfig(
                 num_questions=quiz_config_dict.get('num_questions', 5),
@@ -127,45 +127,48 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
                 question_types=quiz_config_dict.get('question_types', ['multiple_choice'])
             )
             rows = await generate_quiz_table(request, quiz_config)
+            # Create directory only after successful generation, just before writing
+            ensure_storage_dir()
             xlsx_path = _write_quiz_csv_xlsx(storage_path, rows, base_filename=base_filename, quiz_config=quiz_config)
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "assessment" and request.contentConfig.get('assessment'):
-            ensure_storage_dir()
             assessment_config_dict = request.contentConfig.get('assessment')
             assessment_config = AssessmentConfig(**assessment_config_dict)
             rows = await generate_assessment_table(request, assessment_config)
             
+            # Create directory only after successful generation, just before writing
+            ensure_storage_dir()
             # Pass subject and topic names and base_filename
             xlsx_path = _write_assessment_csv_xlsx(
                 storage_path, 
                 rows,
                 subject_name=request.subjectName or "Subject",
                 topic_name=request.topicName or "Topic",
-                base_filename=base_filename
+                base_filename=base_filename,
+                assessment_config=assessment_config
             )
             
             actual_filename = os.path.basename(xlsx_path)
             file_path = xlsx_path
         elif request.contentType == "video" and request.contentConfig.get('video'):
-            ensure_storage_dir()
             video_config_dict = request.contentConfig.get('video')
             video_config = VideoConfig(**video_config_dict)
             generated_content = await generate_video_content(request, video_config, content_id, storage_path, base_filename=base_filename)
             actual_filename = os.path.basename(generated_content)
             file_path = generated_content
         elif request.contentType == "audio" and request.contentConfig.get('audio'):
-            ensure_storage_dir()
             audio_config_dict = request.contentConfig.get('audio')
             audio_config = AudioConfig(**audio_config_dict)
             generated_content = await generate_audio_content(request, audio_config, content_id, storage_path, base_filename=base_filename)
             actual_filename = os.path.basename(generated_content)
             file_path = generated_content
         elif request.contentType == "compiler" and request.contentConfig.get('compiler'):
-            ensure_storage_dir()
             compiler_config_dict = request.contentConfig.get('compiler')
             compiler_config = CompilerConfig(**compiler_config_dict)
             generated_content = await generate_compiler_content(request, compiler_config)
+            # Create directory only after successful generation, just before writing
+            ensure_storage_dir()
             actual_filename = f"{base_filename}.py"
             file_path = os.path.join(storage_path, actual_filename)
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -204,6 +207,17 @@ async def process_content_generation(request: GenerateContentRequest) -> Generat
     except Exception as e:
         print(f"[ERROR] Content generation failed: {str(e)}")
         update_content_status(content_id, "failed", error=str(e))
+        
+        # Clean up: Remove empty directory if it was created
+        try:
+            if os.path.exists(storage_path) and os.path.isdir(storage_path):
+                # Check if directory is empty
+                if not os.listdir(storage_path):
+                    os.rmdir(storage_path)
+                    print(f"[CONTENT] Removed empty directory: {storage_path}")
+        except Exception as cleanup_error:
+            print(f"[CONTENT] Warning: Could not clean up directory {storage_path}: {cleanup_error}")
+        
         raise e
 
 
