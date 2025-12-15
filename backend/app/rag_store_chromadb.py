@@ -24,9 +24,16 @@ class ChromaRAGStore:
             
             # Create collection WITHOUT embedding function
             # We'll provide embeddings explicitly using OpenAI
+            # Configure HNSW parameters to avoid "ef or M is too small" errors
+            # M: number of bi-directional links for each node (higher = better recall, more memory)
+            # ef_construction: size of dynamic candidate list during construction (higher = better quality index)
             self.collection = self.client.get_or_create_collection(
                 name=self.collection_name,
-                metadata={"description": "ICLeaF AI Document Collection"}
+                metadata={
+                    "description": "ICLeaF AI Document Collection",
+                    "hnsw:M": 64,  # Increased from default (16) for better connectivity
+                    "hnsw:ef_construction": 200,  # Increased from default (100) for better index quality
+                }
                 # ← NO embedding_function parameter
                 # We'll provide embeddings manually
             )
@@ -189,9 +196,11 @@ class ChromaRAGStore:
                 where = None  # let Chroma ignore it
 
             # 3) Query Chroma
+            # Note: If you get "ef or M is too small" errors, you may need to recreate the collection
+            # with higher HNSW parameters (see __init__ method)
             results = self.collection.query(
                 query_embeddings=[query_embedding],
-                n_results=top_k,
+                n_results=min(top_k, 100),  # Limit to avoid HNSW issues with very large top_k
                 where=where,
                 include=["documents", "metadatas", "distances"],
             )
