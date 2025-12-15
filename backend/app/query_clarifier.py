@@ -59,6 +59,58 @@ def evaluate_query_for_clarification(query: str, history: Optional[List[SessionM
             message="I didn't catch a question. Could you share what you want to ask?"
         )
 
+    # Explicit disambiguation for ambiguous abbreviations
+    abbreviation_candidates = {
+        "ds": ["data structures", "data science"],
+        "ml": ["machine learning"],
+        "dl": ["deep learning"],
+        "cv": ["computer vision"],
+        "nlp": ["natural language processing"],
+        "ai": ["artificial intelligence"],
+    }
+    text_lower = text.lower()
+    norm_lower = _normalize_query(text).lower()
+    words = norm_lower.split()
+
+    # Case 1: the entire text is just the abbreviation
+    if text_lower in abbreviation_candidates and len(text_lower) <= 3:
+        options = abbreviation_candidates[text_lower]
+        if len(options) == 1:
+            suggestion = options[0]
+            prompt = (
+                f"Did you mean '{suggestion}'?\n"
+                "If not, please rephrase with a bit more detail."
+            )
+        else:
+            pretty_options = " or ".join(f"'{opt}'" for opt in options)
+            prompt = (
+                f"Did you mean {pretty_options}?\n"
+                "If not, please rephrase with a bit more detail."
+            )
+        return ClarificationDecision(
+            should_clarify=True,
+            reason="ambiguous abbreviation",
+            suggested_query=None,
+            message=prompt,
+        )
+
+    # Case 2: last token is an abbreviation, e.g., "what is ds?"
+    if words:
+        last_token = words[-1]
+        if last_token in abbreviation_candidates and len(last_token) <= 3:
+            options = abbreviation_candidates[last_token]
+            pretty_options = " or ".join(f"'{opt}'" for opt in options)
+            prompt = (
+                f"When you say '{last_token}', do you mean {pretty_options}?\n"
+                "If not, please rephrase with a bit more detail."
+            )
+            return ClarificationDecision(
+                should_clarify=True,
+                reason="ambiguous abbreviation",
+                suggested_query=None,
+                message=prompt,
+            )
+
     # Check if this is a response to a clarification request
     if history and len(history) > 0:
         last_assistant_msg = None
@@ -73,8 +125,17 @@ def evaluate_query_for_clarification(query: str, history: Optional[List[SessionM
             confirmation_words = ["yes", "yeah", "yep", "yup", "ok", "okay", "sure", "correct", "right", "that's right", "exactly"]
             text_lower = text.lower().strip()
             if text_lower in confirmation_words or text_lower in [w + "." for w in confirmation_words]:
+                # Try to recover the suggested query from the previous clarification message
+                # Matches lines like: - "Some suggested query"?
+                m = re.search(r'-\s*"([^"]+)"\?', last_assistant_msg)
+                suggested_from_last = m.group(1) if m else None
                 # This is a confirmation - proceed without clarification
-                return ClarificationDecision(should_clarify=False)
+                return ClarificationDecision(
+                    should_clarify=False,
+                    reason="confirmation response",
+                    suggested_query=suggested_from_last,
+                    message=None,
+                )
         
         # Check if this is a follow-up question (like "explain more", "tell me more", etc.)
         # These should be handled by conversation context, not clarification

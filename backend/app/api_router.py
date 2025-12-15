@@ -5,7 +5,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, File, Upload
 from fastapi.responses import FileResponse
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from datetime import datetime
 from .models import (
     ChatRequest, ChatResponse, Source, SessionMessage,
@@ -28,9 +28,18 @@ from .cleanup_service import cleanup_service
 from .query_clarifier import evaluate_query_for_clarification
 from .conversation_context import expand_query_with_context, get_conversation_summary
 from openai import OpenAI
-import time
 import os
 import uuid
+
+
+# Time budgets
+GLOBAL_DEADLINE_SECONDS = 15.0  # raised from 10s to allow slower external fetches
+MODEL_BUDGET_SECONDS = 3.0  # reserve for final LLM call
+
+
+def remaining_time(start_time: float) -> float:
+    """Return remaining wall-clock seconds in the global deadline."""
+    return GLOBAL_DEADLINE_SECONDS - (time.monotonic() - start_time)
 
 
 # Disable ChromaDB telemetry
@@ -45,6 +54,42 @@ upload_semaphore = asyncio.Semaphore(5)
 # LLM client
 client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else None
 
+
+def is_ambiguous_query(text: str) -> bool:
+    """Heuristic gate to decide if we should expand using history."""
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    # Super short
+    if len(t.split()) <= 3:
+        return True
+    # Pronoun / deictic references
+    padded = f" {t} "
+    if any(p in padded for p in [" this ", " that ", " those ", " it ", " them ", " above ", " mentioned"]):
+        return True
+    # Follow-up markers
+    if any(t.startswith(x) for x in ["and ", "also ", "what about", "how about"]):
+        return True
+    return False
+
+
+def maybe_expand_query(user_query: str, session_history: List[SessionMessage]) -> Tuple[str, bool]:
+    """
+    Only expand when the query is ambiguous.
+    Returns (expanded_query, was_expanded).
+    """
+    if not is_ambiguous_query(user_query):
+        return user_query, False
+    filtered_history: List[SessionMessage] = []
+    for m in session_history or []:
+        if m.role == "user":
+            t = (m.content or "").strip().lower()
+            if t in {"yes", "no", "ok", "okay", "yep", "yup", "thanks", "thank you"}:
+                continue
+        filtered_history.append(m)
+    short_history = filtered_history[-2:] if filtered_history else []
+    expanded, was_expanded = expand_query_with_context(user_query, short_history)
+    return expanded, was_expanded
 @api_router.get("/health")
 def health():
     """Comprehensive system health check."""
@@ -188,17 +233,20 @@ async def chatbot_query(req: ChatRequest = Body(...)):
     Enforces 10-second timeout as per API spec.
     """
     print("Hello from chatbot_query.")
-    start_time = time.time()
+    start_time = time.monotonic()
     print(f"[CHATBOT] Received query: '{req.message[:50]}...' in mode: {req.mode}")
     try:
         # Wrap the entire processing in a 10-second timeout
         result = await asyncio.wait_for(
             _process_chatbot_query(req, start_time),
-            timeout=10.0
+            timeout=GLOBAL_DEADLINE_SECONDS
         )
         return result
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=503, detail="Request timeout: Processing took longer than 10 seconds. Please try again with a simpler query.")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Request timeout: Processing took longer than {GLOBAL_DEADLINE_SECONDS:.0f} seconds. Please try again with a simpler query."
+        )
 
 async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatResponse:
     """Process the chatbot query with proper error handling."""
@@ -240,7 +288,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         )
         session_manager.append_history(req.sessionId, assistant_msg)
 
-        response_time = time.time() - start_time
+        response_time = time.monotonic() - start_time
         conversation = Conversation(
             sessionId=req.sessionId,
             userId=req.userId,
@@ -264,23 +312,26 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         )
     # INTERNAL (RAG) mode - FIXED VERSION
 
+    # Decide the effective query (e.g., "yes" -> last suggested query)
+    effective_message = clarification.suggested_query or req.message
+
     # INTERNAL (RAG) mode
     if req.mode == "internal":
-        # Get conversation history for context expansion
+        # Get conversation history for context expansion (only if ambiguous)
         conversation_history = session_manager.get_history(req.sessionId, last=10)
         
-        # Expand query with context if it's a follow-up question
-        search_query, was_expanded = expand_query_with_context(req.message, conversation_history)
+        # Expand only when ambiguous to avoid contamination
+        search_query, was_expanded = maybe_expand_query(effective_message, conversation_history)
         if was_expanded:
-            print(f"[CHATBOT] Expanded query for context: '{req.message}' -> '{search_query[:100]}...'")
+            print(f"[CHATBOT] Expanded query for context: '{effective_message}' -> '{search_query[:100]}...'")
         
         # Apply metadata filters if provided
         subject_id_filter = req.subjectId if req.subjectId else None
         topic_id_filter = req.topicId if req.topicId else None
         doc_name_filter = req.docName if req.docName else None
 
-        # Query-length aware settings (use original message for token count)
-        query_tokens = len(req.message.split())
+        # Query-length aware settings (use effective message for token count)
+        query_tokens = len(effective_message.split())
         has_specific_doc = bool(req.docIds and len(req.docIds) > 0)
         
         # Base similarity thresholds (used only when NO specific docId)
@@ -358,7 +409,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                 doc_name=doc_name_filter
             )
 
-        print(f"[CHATBOT] Internal mode query: '{req.message[:50]}...'")
+        print(f"[CHATBOT] Internal mode query: '{effective_message[:50]}...'")
         print(f"[CHATBOT] Found {len(hits)} RAG hits")
 
         # Use top-k hits for relevance stats (top 3-5) to avoid weak trailing chunks dragging down average
@@ -604,8 +655,13 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         )
         session_manager.append_history(req.sessionId, assistant_msg)
 
+        # Limit sources to maximum of 5
+        if len(sources) > 5:
+            print(f"[CHATBOT] Limiting sources from {len(sources)} to 5")
+            sources = sources[:5]
+
         # Track conversation
-        response_time = time.time() - start_time
+        response_time = time.monotonic() - start_time
         conversation = Conversation(
             sessionId=req.sessionId,
             userId=req.userId,
@@ -633,20 +689,57 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
 
 
     # CLOUD (web / YouTube / GitHub) mode
-    print(f"[CHATBOT] Cloud mode query: '{req.message[:50]}...'")
+    print(f"[CHATBOT] Cloud mode query: '{effective_message[:50]}...'")
     
-    # Get conversation history for context expansion
+    # Get conversation history for context expansion (retrieval)
     conversation_history = session_manager.get_history(req.sessionId, last=10)
     
-    # Expand query with context if it's a follow-up question
-    search_query, was_expanded = expand_query_with_context(req.message, conversation_history)
+    # Re-check clarification (in case it wasn't caught earlier) - don't collect sources if clarification needed
+    clarification_check = evaluate_query_for_clarification(effective_message, conversation_history)
+    if clarification_check.should_clarify:
+        answer = clarification_check.message or (
+            "I want to be sure I understand your request. Could you rephrase it?"
+        )
+        assistant_msg = SessionMessage(
+            role="assistant",
+            content=answer,
+            subjectId=user_msg.subjectId,
+            topicId=user_msg.topicId,
+            docName=user_msg.docName
+        )
+        session_manager.append_history(req.sessionId, assistant_msg)
+        response_time = time.monotonic() - start_time
+        conversation = Conversation(
+            sessionId=req.sessionId,
+            userId=req.userId,
+            mode=req.mode,
+            subjectId=req.subjectId,
+            topicId=req.topicId,
+            docName=req.docName,
+            userMessage=req.message,
+            aiResponse=answer,
+            sources=[],
+            responseTime=response_time,
+            tokenCount=len(answer.split())
+        )
+        conversation_manager.add_conversation(conversation)
+        return ChatResponse(
+            answer=answer,
+            sources=[],
+            sessionId=req.sessionId,
+            mode=req.mode
+        )
+    
+    # Expand query only when ambiguous to avoid contamination (used for retrieval)
+    search_query, was_expanded = maybe_expand_query(effective_message, conversation_history)
     if was_expanded:
-        print(f"[CHATBOT] Expanded query for context: '{req.message}' -> '{search_query[:100]}...'")
+        print(f"[CHATBOT] Expanded query for context: '{effective_message}' -> '{search_query[:100]}...'")
     
     if deps.TAVILY_API_KEY:
         try:
-            web_results = await wc.tavily_search(search_query, deps.TAVILY_API_KEY, max_results=5)  # Use expanded query
+            web_results = await wc.tavily_search(search_query, deps.TAVILY_API_KEY, max_results=3)  # Reduced to lighten work
             for r in web_results:
+                # Always add source first
                 sources.append(
                     Source(
                         title=r.get("title") or r.get("url", "Web page"),
@@ -654,44 +747,50 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                         score=r.get("score"),
                     )
                 )
-                if r.get("url"):
+                # Only fetch content if we haven't reached context limit
+                if len(context_blocks) < 4 and r.get("url"):  # tighter limit to reduce work per call
                     try:
                         txt = await wc.fetch_url_text(r["url"])
                         if txt:
                             context_blocks.append(txt)
-                        if len(context_blocks) >= 8:
-                            break
                     except Exception:
                         continue
             print(f"[CHATBOT] Added {len([s for s in sources if 'YouTube' not in s.title and 'GitHub' not in s.title])} web sources from Tavily")
         except Exception as e:
             print(f"[CHATBOT] Tavily search error: {e}")
 
-    if len(context_blocks) < 8 and deps.YOUTUBE_API_KEY:
+    # Always collect YouTube sources if API key is set (regardless of context_blocks limit)
+    if deps.YOUTUBE_API_KEY:
         try:
             yt_results = await wc.youtube_search(search_query, deps.YOUTUBE_API_KEY, max_results=3)  # Use expanded query
             for y in yt_results:
+                # Always add source
                 sources.append(Source(title=f"YouTube: {y['title']}", url=y["url"]))
-                transcript = wc.youtube_fetch_transcript_text(y["videoId"])
-                if transcript:
-                    context_blocks.append(transcript)
-                if len(context_blocks) >= 8:
-                    break
+                # Only fetch transcript if we haven't reached context limit
+                if len(context_blocks) < 8:
+                    transcript = wc.youtube_fetch_transcript_text(y["videoId"])
+                    if transcript:
+                        context_blocks.append(transcript)
             print(f"[CHATBOT] Added {len([s for s in sources if 'YouTube' in s.title])} YouTube sources")
         except Exception as e:
             print(f"[CHATBOT] YouTube search error: {e}")
 
-    if len(context_blocks) < 8:
+    # Always collect GitHub sources if token is set (regardless of context_blocks limit)
+    if deps.GITHUB_TOKEN:
         try:
             gh_results = await wc.github_search_code(search_query, deps.GITHUB_TOKEN, max_results=3)  # Use expanded query
             for g in gh_results:
-                text, dl_url = await wc.github_fetch_file_text(g.get("api_url"), deps.GITHUB_TOKEN)
                 title = f"GitHub: {g.get('repository_full_name')}/{g.get('path')}"
-                sources.append(Source(title=title, url=dl_url or g.get("html_url")))
-                if text:
-                    context_blocks.append(text)
-                if len(context_blocks) >= 8:
-                    break
+                # Always add source
+                sources.append(Source(title=title, url=g.get("html_url")))
+                # Only fetch file content if we haven't reached context limit
+                if len(context_blocks) < 8:
+                    text, dl_url = await wc.github_fetch_file_text(g.get("api_url"), deps.GITHUB_TOKEN)
+                    if text:
+                        context_blocks.append(text)
+                    # Update source URL if we got a download URL
+                    if dl_url and sources:
+                        sources[-1].url = dl_url or sources[-1].url
             print(f"[CHATBOT] Added {len([s for s in sources if 'GitHub' in s.title])} GitHub sources")
         except Exception as e:
             print(f"[CHATBOT] GitHub search error: {e}")
@@ -723,10 +822,11 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     # Ensure the userId has a mapping to this sessionId for consistency
     session_manager.ensure_user_session_mapping(req.userId, req.sessionId)
     
-    # Add session history
-    for m in session_manager.get_history(req.sessionId, last=10):
+    # Add short, recent session history for answering (avoid polluting retrieval)
+    history_messages = session_manager.get_history(req.sessionId, last=5)
+    for m in history_messages:
         messages.append(m.model_dump())
-    messages.append({"role": "user", "content": req.message})
+    messages.append({"role": "user", "content": effective_message})
 
     if client is None:
         answer = (
@@ -767,6 +867,38 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         docName=user_msg.docName
     )
     session_manager.append_history(req.sessionId, assistant_msg)
+
+    # Check if the response is asking for clarification - if so, don't show sources
+    answer_lower = answer.lower()
+    clarification_indicators = [
+        "i'm not sure",
+        "could you clarify",
+        "could you please clarify",
+        "please clarify",
+        "i need more information",
+        "can you provide more",
+        "what do you mean",
+        "what does",
+        "i don't understand",
+        "not sure what",
+        "unclear",
+        "rephrase",
+        "more detail",
+        "more context",
+        "just to confirm",
+        "did you mean"
+    ]
+    is_clarification_response = any(indicator in answer_lower for indicator in clarification_indicators)
+    
+    # If response is asking for clarification, don't show sources
+    if is_clarification_response:
+        print(f"[CHATBOT] Response is asking for clarification - not showing sources")
+        sources = []
+    else:
+        # Limit sources to maximum of 5
+        if len(sources) > 5:
+            print(f"[CHATBOT] Limiting sources from {len(sources)} to 5")
+            sources = sources[:5]
 
     # Track conversation for analytics
     response_time = time.time() - start_time
