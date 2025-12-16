@@ -696,26 +696,26 @@ export default function ContentPage({ role, mode, apiUrl }: ContentPageProps) {
                     <option value="true_false">True/False</option>
                     <option value="mixed">Mixed</option>
                   </select>
-                </div>
+              </div>
                 <div>
-                  <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-                    Difficulty
-                  </label>
-                  <select
+                <label style={{ display: "block", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                  Difficulty
+                </label>
+                <select
                     value={quizConfig.difficulty}
                     onChange={(e) => setQuizConfig({...quizConfig, difficulty: e.target.value as any})}
-                    style={{
+                  style={{
                       width: "100%",
-                      padding: 8,
-                      border: "1px solid #ccc",
-                      borderRadius: 4,
-                      fontSize: 14,
-                    }}
-                  >
-                    <option value="easy">Easy</option>
-                    <option value="medium">Medium</option>
-                    <option value="hard">Hard</option>
-                  </select>
+                    padding: 8,
+                    border: "1px solid #ccc",
+                    borderRadius: 4,
+                    fontSize: 14,
+                  }}
+                >
+                  <option value="easy">Easy</option>
+                  <option value="medium">Medium</option>
+                  <option value="hard">Hard</option>
+                </select>
                 </div>
               </div>
             </div>

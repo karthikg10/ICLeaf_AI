@@ -2,7 +2,7 @@
 import asyncio
 import time
 from fastapi import APIRouter, Body, HTTPException, Query, Request, File, UploadFile, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
 from typing import List, Optional, Tuple
@@ -219,12 +219,20 @@ def internal_search(
         }
     }
 
-@api_router.options("/chatbot/query")
-async def chatbot_query_options(request: Request):
-    """Handle OPTIONS preflight requests for CORS."""
-    from fastapi.responses import Response
-    # Return empty response with 200 status - CORS middleware will add headers
-    return Response(status_code=200, content="")
+@api_router.api_route("/chatbot/query", methods=["OPTIONS"], include_in_schema=False)
+async def chatbot_query_options():
+    """Handle OPTIONS preflight requests - must be before POST route."""
+    # Return 200 with empty body - CORS middleware will add headers
+    return Response(
+        status_code=200,
+        content="",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "3600",
+        }
+    )
 
 @api_router.post("/chatbot/query", response_model=ChatResponse)
 async def chatbot_query(req: ChatRequest = Body(...)):
@@ -310,28 +318,43 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
             sessionId=req.sessionId,
             mode=req.mode
         )
-    # INTERNAL (RAG) mode - FIXED VERSION
-
-    # Decide the effective query (e.g., "yes" -> last suggested query)
+    # After clarification: decide what we will actually search/answer on
     effective_message = clarification.suggested_query or req.message
+    
+    # If effective_message is a single word (from confirmation), expand it to a more general query
+    # This prevents retrieving overly specific content (e.g., "advantages of X") when user wants general info
+    if clarification.suggested_query and len(effective_message.split()) == 1:
+        # Expand single-word queries to "explain X" for broader, more general retrieval
+        effective_message = f"explain {effective_message.lower()}"
 
     # INTERNAL (RAG) mode
     if req.mode == "internal":
         # Get conversation history for context expansion (only if ambiguous)
         conversation_history = session_manager.get_history(req.sessionId, last=10)
         
-        # Expand only when ambiguous to avoid contamination
-        search_query, was_expanded = maybe_expand_query(effective_message, conversation_history)
+        # Use clarified text if we have it
+        query_for_expansion = effective_message
+        
+        # If this came from a clarification (suggested_query), treat it as already disambiguated
+        if clarification.suggested_query:
+            search_query = query_for_expansion
+            was_expanded = False
+        else:
+            search_query, was_expanded = maybe_expand_query(query_for_expansion, conversation_history)
+        
         if was_expanded:
-            print(f"[CHATBOT] Expanded query for context: '{effective_message}' -> '{search_query[:100]}...'")
+            print(
+                f"[CHATBOT] Expanded query for context: "
+                f"'{query_for_expansion}' -> '{search_query[:100]}...'"
+            )
         
         # Apply metadata filters if provided
         subject_id_filter = req.subjectId if req.subjectId else None
         topic_id_filter = req.topicId if req.topicId else None
         doc_name_filter = req.docName if req.docName else None
 
-        # Query-length aware settings (use effective message for token count)
-        query_tokens = len(effective_message.split())
+        # Query-length aware settings (based on the *effective* query)
+        query_tokens = len(query_for_expansion.split())
         has_specific_doc = bool(req.docIds and len(req.docIds) > 0)
         
         # Base similarity thresholds (used only when NO specific docId)
@@ -409,7 +432,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                 doc_name=doc_name_filter
             )
 
-        print(f"[CHATBOT] Internal mode query: '{effective_message[:50]}...'")
+        print(f"[CHATBOT] Internal mode query: '{query_for_expansion[:50]}...'")
         print(f"[CHATBOT] Found {len(hits)} RAG hits")
 
         # Use top-k hits for relevance stats (top 3-5) to avoid weak trailing chunks dragging down average
@@ -580,8 +603,11 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
             {"role": "system", "content": system_prompt}
         ]
 
-        # Add session history (last 5 messages)
-        history_messages = session_manager.get_history(req.sessionId, last=5)
+        # Get recent history and drop the current raw message if present (e.g., a "yes" confirmation)
+        history_messages = session_manager.get_history(req.sessionId, last=6)
+        if history_messages and history_messages[-1].role == "user" and history_messages[-1].content == req.message:
+            history_messages = history_messages[:-1]
+
         for m in history_messages:
             msg_dict = m.model_dump()
             if msg_dict.get("role") and msg_dict.get("content"):
@@ -590,8 +616,8 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                     "content": msg_dict["content"]
                 })
 
-        # Add current user message
-        messages.append({"role": "user", "content": req.message})
+        # Add the resolved user message (clarified/effective query)
+        messages.append({"role": "user", "content": effective_message})
 
         print(f"[CHATBOT] Total messages: {len(messages)}")
         print(f"[CHATBOT] Context length: {len(ctx)} chars")
@@ -689,51 +715,21 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
 
 
     # CLOUD (web / YouTube / GitHub) mode
-    print(f"[CHATBOT] Cloud mode query: '{effective_message[:50]}...'")
-    
     # Get conversation history for context expansion (retrieval)
     conversation_history = session_manager.get_history(req.sessionId, last=10)
     
-    # Re-check clarification (in case it wasn't caught earlier) - don't collect sources if clarification needed
-    clarification_check = evaluate_query_for_clarification(effective_message, conversation_history)
-    if clarification_check.should_clarify:
-        answer = clarification_check.message or (
-            "I want to be sure I understand your request. Could you rephrase it?"
-        )
-        assistant_msg = SessionMessage(
-            role="assistant",
-            content=answer,
-            subjectId=user_msg.subjectId,
-            topicId=user_msg.topicId,
-            docName=user_msg.docName
-        )
-        session_manager.append_history(req.sessionId, assistant_msg)
-        response_time = time.monotonic() - start_time
-        conversation = Conversation(
-            sessionId=req.sessionId,
-            userId=req.userId,
-            mode=req.mode,
-            subjectId=req.subjectId,
-            topicId=req.topicId,
-            docName=req.docName,
-            userMessage=req.message,
-            aiResponse=answer,
-            sources=[],
-            responseTime=response_time,
-            tokenCount=len(answer.split())
-        )
-        conversation_manager.add_conversation(conversation)
-        return ChatResponse(
-            answer=answer,
-            sources=[],
-            sessionId=req.sessionId,
-            mode=req.mode
-        )
-    
     # Expand query only when ambiguous to avoid contamination (used for retrieval)
-    search_query, was_expanded = maybe_expand_query(effective_message, conversation_history)
+    query_for_expansion = effective_message
+    # If this came from a clarification (suggested_query), treat it as already disambiguated
+    if clarification.suggested_query:
+        search_query = query_for_expansion
+        was_expanded = False
+    else:
+        search_query, was_expanded = maybe_expand_query(query_for_expansion, conversation_history)
     if was_expanded:
-        print(f"[CHATBOT] Expanded query for context: '{effective_message}' -> '{search_query[:100]}...'")
+        print(f"[CHATBOT] Expanded cloud query: '{query_for_expansion}' -> '{search_query[:100]}...'")
+    
+    print(f"[CHATBOT] Cloud mode query: '{query_for_expansion[:50]}...'")
     
     if deps.TAVILY_API_KEY:
         try:
@@ -762,7 +758,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     # Always collect YouTube sources if API key is set (regardless of context_blocks limit)
     if deps.YOUTUBE_API_KEY:
         try:
-            yt_results = await wc.youtube_search(search_query, deps.YOUTUBE_API_KEY, max_results=3)  # Use expanded query
+            yt_results = await wc.youtube_search(search_query, deps.YOUTUBE_API_KEY, max_results=1)  # Use expanded query
             for y in yt_results:
                 # Always add source
                 sources.append(Source(title=f"YouTube: {y['title']}", url=y["url"]))
@@ -826,7 +822,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     history_messages = session_manager.get_history(req.sessionId, last=5)
     for m in history_messages:
         messages.append(m.model_dump())
-    messages.append({"role": "user", "content": effective_message})
+    messages.append({"role": "user", "content": query_for_expansion})
 
     if client is None:
         answer = (

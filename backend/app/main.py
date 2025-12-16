@@ -37,6 +37,7 @@ app = FastAPI(title="ICLeaF Chatbot", version="0.2")
 
 # ---- CORS (for the React frontend) ----
 # IMPORTANT: Add CORS middleware BEFORE including routers
+# CORS middleware automatically handles OPTIONS preflight requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=deps.ALLOWED_ORIGINS if deps.ALLOWED_ORIGINS else ["*"],

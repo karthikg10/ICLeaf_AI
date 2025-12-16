@@ -27,6 +27,7 @@ FOLLOW_UP_INDICATORS = [
 def is_follow_up_question(message: str, history: List[SessionMessage]) -> bool:
     """
     Detect if a message is likely a follow-up question that needs context.
+    Only treats messages as follow-ups if they have explicit signals.
     
     Args:
         message: The current user message
@@ -40,22 +41,26 @@ def is_follow_up_question(message: str, history: List[SessionMessage]) -> bool:
     
     message_lower = message.lower().strip()
     
-    # Very short messages are often follow-ups
-    if len(message.split()) <= 3:
-        return True
+    # ONLY treat as follow-up if there are explicit signals
     
-    # Check for follow-up indicators
+    # 1) Pronouns / reference words / "pros/cons/..." etc.
     for pattern in FOLLOW_UP_INDICATORS:
         if re.search(pattern, message_lower, re.IGNORECASE):
             return True
     
-    # Check if message starts with vague phrases
+    # 2) Vague starter phrases
     vague_starters = [
-        "tell me", "explain", "what about", "how about", 
+        "tell me", "explain", "what about", "how about",
         "what else", "give me", "show me", "describe"
     ]
     for starter in vague_starters:
         if message_lower.startswith(starter):
+            return True
+    
+    # 3) Very short, but ONLY if they *look* like classic follow-ups
+    # e.g. "more", "details", "examples", "its pros"
+    if len(message_lower.split()) <= 3:
+        if any(word in message_lower for word in ["more", "details", "examples", "pros", "cons"]):
             return True
     
     return False

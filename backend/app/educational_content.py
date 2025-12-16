@@ -153,7 +153,7 @@ Make sure each question has exactly 2 answer choices (True and False) and the co
     else:
         # Multiple choice or mixed - 4 options
         question_type_desc = "Mixed (Multiple Choice and True/False)" if is_mixed else "Multiple Choice"
-        system_prompt = f"""You are an educational quiz generator. Create a quiz in a structured table format with the following specifications:
+    system_prompt = f"""You are an educational quiz generator. Create a quiz in a structured table format with the following specifications:
 - Number of questions: {config.num_questions}
 - Difficulty: {config.difficulty}
 - Question types: {question_type_desc}
@@ -211,12 +211,12 @@ async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfi
     if is_only_true_false:
         # Only true/false - no answer_3 and answer_4
         keys = [
-            "s_no","question","correct_answer","answer_desc","answer_1","answer_2"
+            "s_no", "question", "correct_answer", "answer_desc", "answer_1", "answer_2"
         ]
     else:
         # Multiple choice or mixed - include all 4 answers
         keys = [
-            "s_no","question","correct_answer","answer_desc","answer_1","answer_2","answer_3","answer_4"
+            "s_no", "question", "correct_answer", "answer_desc", "answer_1", "answer_2", "answer_3", "answer_4"
         ]
 
     if is_only_true_false:
@@ -263,14 +263,14 @@ async def generate_quiz_table(request: GenerateContentRequest, config: QuizConfi
     else:
         # Only multiple choice - 4 options
         system_prompt = (
-            "You generate quiz rows for CSV/XLSX export. Return ONLY JSON array (no markdown) "
-            "with objects using EXACT keys: " + ",".join(keys) + ". "
-            "'s_no' starts at 1 and increments. 'correct_answer' is 1-4. "
-            "'answer_desc' is a brief explanation of why the correct answer is right (20-50 words). "
-            f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}. "
+        "You generate quiz rows for CSV/XLSX export. Return ONLY JSON array (no markdown) "
+        "with objects using EXACT keys: " + ",".join(keys) + ". "
+        "'s_no' starts at 1 and increments. 'correct_answer' is 1-4. "
+        "'answer_desc' is a brief explanation of why the correct answer is right (20-50 words). "
+        f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}. "
             "All questions must be multiple choice with 4 options. "
-            "Generate realistic, educational content."
-        )
+        "Generate realistic, educational content."
+    )
         user_prompt = (
             f"Create quiz rows for: {request.prompt}. "
             f"Keep questions concise and unambiguous. "
@@ -515,7 +515,7 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
         system_prompt += (
             f"IMPORTANT: Mix the question types ({', '.join(config.question_types)}). "
             f"Distribute them evenly across the {config.num_questions} questions.\n\n"
-        )
+    )
     
     if rag_context:
         system_prompt += f"""
@@ -746,7 +746,7 @@ def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], su
         col_idx += 1
     
     num_cols = len(columns)
-    
+
     # XLSX Format
     workbook = xlsxwriter.Workbook(xlsx_path)
     ws = workbook.add_worksheet("Sheet1")

@@ -113,23 +113,38 @@ def evaluate_query_for_clarification(query: str, history: Optional[List[SessionM
 
     # Check if this is a response to a clarification request
     if history and len(history) > 0:
-        last_assistant_msg = None
+        last_assistant_msg: Optional[str] = None
         for msg in reversed(history):
             if msg.role == "assistant":
-                last_assistant_msg = msg.content
+                last_assistant_msg = msg.content or ""
                 break
         
         # If last message was a clarification request, check if this is a confirmation
         if last_assistant_msg and ("Just to confirm" in last_assistant_msg or "Did you mean" in last_assistant_msg):
             # Common confirmation responses - don't clarify these
-            confirmation_words = ["yes", "yeah", "yep", "yup", "ok", "okay", "sure", "correct", "right", "that's right", "exactly"]
+            confirmation_words = [
+                "yes", "yeah", "yep", "yup",
+                "ok", "okay", "sure", "correct",
+                "right", "that's right", "exactly"
+            ]
             text_lower = text.lower().strip()
             if text_lower in confirmation_words or text_lower in [w + "." for w in confirmation_words]:
                 # Try to recover the suggested query from the previous clarification message
-                # Matches lines like: - "Some suggested query"?
-                m = re.search(r'-\s*"([^"]+)"\?', last_assistant_msg)
-                suggested_from_last = m.group(1) if m else None
-                # This is a confirmation - proceed without clarification
+                suggested_from_last: Optional[str] = None
+
+                # Case 1: generic short-query clarifier:
+                # "Just to confirm: ... Did you mean:\n- \"Some cleaned query\"?"
+                m1 = re.search(r'-\s*"([^"]+)"\?', last_assistant_msg)
+                if m1:
+                    suggested_from_last = m1.group(1)
+
+                # Case 2: abbreviation clarifier:
+                # "Did you mean 'machine learning'?\nIf not, please rephrase..."
+                if suggested_from_last is None:
+                    m2 = re.search(r"Did you mean '([^']+)'", last_assistant_msg)
+                    if m2:
+                        suggested_from_last = m2.group(1)
+
                 return ClarificationDecision(
                     should_clarify=False,
                     reason="confirmation response",
