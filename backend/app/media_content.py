@@ -93,6 +93,21 @@ async def generate_audio_content(request: GenerateContentRequest, config: AudioC
     validate_rag_context_for_internal_mode(rag_result, request)  # Validate context relevance
     rag_context = rag_result.context
     
+    # For internal mode, ensure we have valid context before proceeding
+    if request.mode == "internal":
+        if not rag_context or not rag_context.strip():
+            raise ValueError(
+                f"No relevant content found in the specified documents for the topic '{request.prompt}'. "
+                "Please ensure the document(s) contain information related to this topic."
+            )
+        
+        # Check if context is actually relevant (metadata check)
+        if not rag_result.metadata.get("is_relevant", False):
+            raise ValueError(
+                f"The content in the specified documents is not relevant to '{request.prompt}'. "
+                "Please select documents that contain information about this topic."
+            )
+    
     # Generate the script content
     # IMPORTANT: We need ONLY the spoken script text, no meta-commentary or disclaimers
     system_prompt = f"""You are a professional script writer for audio content. Your task is to write ONLY the spoken script text that will be converted to speech using text-to-speech technology.
@@ -107,21 +122,41 @@ CRITICAL RULES:
 - Target audience: {request.role}
 - Make it engaging, conversational, and suitable for audio listening"""
     
-    if rag_context:
+    if rag_context and request.mode == "internal":
         system_prompt += f"""
 
-IMPORTANT: You are in INTERNAL MODE. Use the provided context from uploaded documents below to create an accurate audio script. Base your content ONLY on the information provided in the context blocks.
+CRITICAL: You are in INTERNAL MODE. You MUST use ONLY the information provided in the context blocks below. 
+
+STRICT REQUIREMENTS:
+- You MUST base your audio script EXCLUSIVELY on the information in the context blocks
+- DO NOT add any information that is not present in the context
+- DO NOT make up facts, examples, or details not found in the context
+- DO NOT use general knowledge - only use what is explicitly stated in the context
+- If the context doesn't fully cover the requested topic, focus ONLY on what is available in the context
+- Ensure every statement in your script can be traced back to the context provided
+- Use specific details, examples, and information directly from the context blocks
 
 CONTEXT FROM UPLOADED DOCUMENTS:
 {rag_context}
 
-Instructions:
-- Create the audio script based on the information in the context above
-- Ensure the content is factually accurate to the source material
-- Use specific details from the documents
-- If the context doesn't cover the topic fully, create content based on what is available"""
+Remember: Your script must be based SOLELY on the context above. Do not supplement with external knowledge."""
     
-    user_prompt = f"""Write the spoken script for an audio recording about: {request.prompt}
+    if request.mode == "internal" and rag_context:
+        user_prompt = f"""Write the spoken script for an audio recording about: {request.prompt}
+
+CRITICAL REQUIREMENTS FOR INTERNAL MODE:
+- You MUST use ONLY the information from the context blocks provided above
+- DO NOT add any information, facts, or examples that are not in the context
+- Focus on what is available in the context, even if it doesn't fully cover the topic
+- Write ONLY the spoken words (no meta-commentary)
+- Target duration: {config.duration_seconds} seconds when spoken
+- Write naturally as if speaking directly to the listener
+- Be engaging and conversational
+- Start immediately with the content (no introductions about scripts or audio files)
+
+Begin the script now, using ONLY information from the provided context:"""
+    else:
+        user_prompt = f"""Write the spoken script for an audio recording about: {request.prompt}
 
 Requirements:
 - Write ONLY the spoken words (no meta-commentary)
@@ -132,13 +167,17 @@ Requirements:
 
 Begin the script now:"""
     
+    # Use lower temperature for internal mode to ensure more accurate, document-based content
+    # Higher temperature for external mode to allow more creative content
+    temperature = 0.3 if request.mode == "internal" else 0.7
+    
     response = content_client.chat.completions.create(
         model=deps.OPENAI_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        temperature=0.7
+        temperature=temperature
     )
     
     script_content = extract_openai_response(response)
