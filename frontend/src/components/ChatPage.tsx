@@ -35,10 +35,15 @@ interface ChatPageProps {
   apiUrl: string;
 }
 
-// Helper function to render markdown bold (**text**) as HTML
+// Helper function to render simple markdown (**bold**, *emphasis*) as HTML
 const renderMarkdownBold = (text: string): string => {
+  let html = text;
   // Convert **text** to <strong>text</strong>
-  return text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+  // Convert *text* (single-asterisk, not bullets) to <strong>text</strong> for sub-headings
+  // Matches *Something* where the asterisks enclose non-* characters and are not part of a list item
+  html = html.replace(/(^|\s)\*([^\*\n]+)\*(?=\s|$)/g, "$1<strong>$2</strong>");
+  return html;
 };
 
 export default function ChatPage({ role, mode, apiUrl }: ChatPageProps) {

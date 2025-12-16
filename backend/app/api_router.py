@@ -759,6 +759,8 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     if deps.YOUTUBE_API_KEY:
         try:
             yt_results = await wc.youtube_search(search_query, deps.YOUTUBE_API_KEY, max_results=1)  # Use expanded query
+            # Enforce a hard cap of 1 YouTube result in case the API ignores max_results
+            yt_results = yt_results[:1]
             for y in yt_results:
                 # Always add source
                 sources.append(Source(title=f"YouTube: {y['title']}", url=y["url"]))
@@ -803,7 +805,7 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     system_prompt = (
         "You are ICLeaF LMS's cloud-mode assistant. "
         f"User role: {req.role}. Provide concise, correct answers. "
-        "If context is provided, cite sources with [1], [2], ... matching the source list. "
+        "Do NOT include numeric source markers like [1], [2], etc., in your answer. "
         "If you're unsure, say so. "
         "IMPORTANT: Use the conversation history below to understand follow-up questions. "
         "If the user asks about 'it', 'its', 'the topic', etc., refer to the previous conversation context to understand what they're referring to."
@@ -840,6 +842,17 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
             answer = completion.choices[0].message.content
             # Clean markdown formatting from chat response
             answer = clean_markdown_formatting(answer)
+            # Strip trailing numeric source markers like "[1]" or "[1]." that the model may still emit
+            trimmed = answer.rstrip()
+            # First remove trailing periods/spaces, then check for a numeric marker
+            trimmed_no_punct = trimmed.rstrip(" .")
+            if trimmed_no_punct.endswith("]"):
+                open_idx = trimmed_no_punct.rfind("[")
+                if open_idx != -1:
+                    marker_inner = trimmed_no_punct[open_idx + 1 : -1]
+                    if marker_inner.isdigit():
+                        # Remove the marker and any trailing punctuation/space before it
+                        answer = trimmed_no_punct[:open_idx].rstrip(" .")
         except Exception as e:
             error_str = str(e)
             if "Invalid API key" in error_str or "incorrect API key" in error_str.lower():
