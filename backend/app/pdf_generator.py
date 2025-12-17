@@ -194,9 +194,10 @@ Instructions:
 - Create content based on the information in the context above
 - Ensure the content is factually accurate to the source material
 - Use specific details and examples from the documents
-- Expand extensively on the concepts found in the context to reach the required {total_words_needed} words
-- Add multiple examples, use cases, practical applications, common mistakes, best practices
-- If the context doesn't cover the topic fully, create content based on what is available and expand it
+- Expand the concepts found in the context to reach the required {total_words_needed} words,
+  but ONLY by elaborating and giving more explanations and examples of what is already in the context.
+- If the context doesn't cover a subtopic, it is OK to leave that subtopic out or state that it is not covered.
+- Do NOT introduce new topics or facts that are not supported by the context.
 - CRITICAL: Continue writing until you reach {total_words_needed} words - do not stop early"""
 
     user_prompt = f"""Create a {num_pages}-page document about: {request.prompt}
@@ -446,9 +447,10 @@ Instructions:
 - Create content based on the information in the context above
 - Ensure the content is factually accurate to the source material
 - Use specific details and examples from the documents
-- Expand extensively on the concepts found in the context to reach the required {total_words_needed} words
-- Add multiple examples, use cases, practical applications, common mistakes, best practices
-- If the context doesn't cover the topic fully, create content based on what is available and expand it
+- Expand the concepts found in the context to reach the required {total_words_needed} words,
+  but ONLY by elaborating and giving more explanations and examples of what is already in the context.
+- If the context doesn't cover a subtopic, it is OK to leave that subtopic out or state that it is not covered.
+- Do NOT introduce new topics or facts that are not supported by the context.
 - CRITICAL: Continue writing until you reach {total_words_needed} words - do not stop early"""
 
     user_prompt = f"""Create a {num_pages}-page document about: {request.prompt}
