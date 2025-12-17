@@ -279,9 +279,17 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
     # Get conversation history for clarification check
     conversation_history = session_manager.get_history(req.sessionId, last=10)
 
+    # Build domain hint for internal mode (helps disambiguate abbreviations like "ds")
+    domain_hint = " ".join(filter(None, [req.docName or "", req.subjectId or "", req.topicId or ""]))
+
     # Early clarification step shared by both internal and external modes.
-    # Pass history so it can skip clarification for follow-ups and confirmations
-    clarification = evaluate_query_for_clarification(req.message, conversation_history)
+    # Pass history, mode, and domain_hint so it can skip clarification for follow-ups and confirmations
+    clarification = evaluate_query_for_clarification(
+        req.message,
+        conversation_history,
+        mode=req.mode,
+        domain_hint=domain_hint,
+    )
     if clarification.should_clarify:
         answer = clarification.message or (
             "I want to be sure I understand your request. Could you rephrase it?"
@@ -561,20 +569,21 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         # Build system prompt with context
         system_prompt = f"""You are ICLeaF LMS's internal-mode assistant helping students learn from documents.
 
-    INSTRUCTIONS:
-    1. Answer ONLY using the provided context below
-    2. Be helpful and educational
-    3. Do NOT include citations, references, or content block markers in your response
-    4. Use **bold** markdown formatting ONLY for headings and subheadings (e.g., **Heading**, **Subheading**)
-    5. Do NOT use other markdown formatting (no __, no *, no #, no lists with -, no code blocks)
-    6. Write in plain text for body content, use **bold** only for headings/subheadings
-    7. If context is provided but seems insufficient, still give your best answer based on it
-    8. IMPORTANT: Use the conversation history below to understand follow-up questions. If the user asks about "it", "its", "the topic", etc., refer to the previous conversation context to understand what they're referring to.
+INSTRUCTIONS:
+1. Answer ONLY using the provided context below.
+2. If the context does NOT contain enough information to directly answer the question,
+   you MUST say so explicitly and do NOT invent new facts, trends, or predictions.
+3. You are not allowed to rely on outside knowledge; everything must be supported by the context.
+4. Be helpful and educational within those limits.
+5. Do NOT include citations, references, or content block markers in your response.
+6. Use **bold** markdown ONLY for headings and subheadings (e.g., **Heading**, **Subheading**).
+7. Write body text in plain language without other markdown formatting.
+8. Use the conversation history only to understand follow-up questions. If the user asks about "it", "its", "the topic", etc., refer to the previous conversation context to understand what they're referring to.
 
-    CONTEXT ({len(context_blocks)} blocks, {len(sources)} sources):
-    {ctx}{context_note}
+CONTEXT ({len(context_blocks)} blocks, {len(sources)} sources):
+{ctx}{context_note}
 
-    Now answer the user's question (use **bold** for headings and subheadings only):"""
+Now answer the user's question (use **bold** for headings and subheadings only):"""
 
     #     system_prompt = f"""You are ICLeaF LMS's internal-mode assistant. Your role is to help {req.role}s learn from the provided document context.
 

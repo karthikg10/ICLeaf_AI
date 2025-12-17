@@ -183,17 +183,23 @@ class ChromaRAGStore:
                 return []
 
             # 2) Build a valid 'where' dict (AND semantics)
-            where: Optional[Dict[str, Any]] = {}
+            # ChromaDB requires $and operator when multiple conditions are present
+            conditions: List[Dict[str, Any]] = []
             if subject_id:
-                where["subjectId"] = subject_id
+                conditions.append({"subjectId": subject_id})
             if topic_id:
-                where["topicId"] = topic_id
+                conditions.append({"topicId": topic_id})
             if doc_name:
-                where["docName"] = doc_name
+                conditions.append({"docName": doc_name})
             if doc_id:
-                where["docId"] = doc_id
-            if not where:
-                where = None  # let Chroma ignore it
+                conditions.append({"docId": doc_id})
+            
+            # Build where clause based on number of conditions
+            where: Optional[Dict[str, Any]] = None
+            if len(conditions) == 1:
+                where = conditions[0]  # Single condition, no $and needed
+            elif len(conditions) > 1:
+                where = {"$and": conditions}  # Multiple conditions need $and
 
             # 3) Query Chroma
             # Note: If you get "ef or M is too small" errors, you may need to recreate the collection

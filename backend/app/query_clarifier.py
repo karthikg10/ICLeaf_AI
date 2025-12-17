@@ -42,7 +42,12 @@ def _describe_reasons(reasons: List[str]) -> str:
     return ", ".join(reasons[:-1]) + f" and {reasons[-1]}"
 
 
-def evaluate_query_for_clarification(query: str, history: Optional[List[SessionMessage]] = None) -> ClarificationDecision:
+def evaluate_query_for_clarification(
+    query: str,
+    history: Optional[List[SessionMessage]] = None,
+    mode: str = "external",
+    domain_hint: Optional[str] = None,
+) -> ClarificationDecision:
     """
     Decide whether to ask the user for clarification.
     Heuristics only; no external dependencies.
@@ -50,6 +55,8 @@ def evaluate_query_for_clarification(query: str, history: Optional[List[SessionM
     Args:
         query: The user's message
         history: Optional conversation history to check for context
+        mode: "internal" or "external" - affects abbreviation disambiguation
+        domain_hint: Optional hint (docName, subjectId, topicId) to help disambiguate in internal mode
     """
     text = (query or "").strip()
     if not text:
@@ -59,59 +66,8 @@ def evaluate_query_for_clarification(query: str, history: Optional[List[SessionM
             message="I didn't catch a question. Could you share what you want to ask?"
         )
 
-    # Explicit disambiguation for ambiguous abbreviations
-    abbreviation_candidates = {
-        "ds": ["data structures", "data science"],
-        "ml": ["machine learning"],
-        "dl": ["deep learning"],
-        "cv": ["computer vision"],
-        "nlp": ["natural language processing"],
-        "ai": ["artificial intelligence"],
-    }
-    text_lower = text.lower()
-    norm_lower = _normalize_query(text).lower()
-    words = norm_lower.split()
-
-    # Case 1: the entire text is just the abbreviation
-    if text_lower in abbreviation_candidates and len(text_lower) <= 3:
-        options = abbreviation_candidates[text_lower]
-        if len(options) == 1:
-            suggestion = options[0]
-            prompt = (
-                f"Did you mean '{suggestion}'?\n"
-                "If not, please rephrase with a bit more detail."
-            )
-        else:
-            pretty_options = " or ".join(f"'{opt}'" for opt in options)
-            prompt = (
-                f"Did you mean {pretty_options}?\n"
-                "If not, please rephrase with a bit more detail."
-            )
-        return ClarificationDecision(
-            should_clarify=True,
-            reason="ambiguous abbreviation",
-            suggested_query=None,
-            message=prompt,
-        )
-
-    # Case 2: last token is an abbreviation, e.g., "what is ds?"
-    if words:
-        last_token = words[-1]
-        if last_token in abbreviation_candidates and len(last_token) <= 3:
-            options = abbreviation_candidates[last_token]
-            pretty_options = " or ".join(f"'{opt}'" for opt in options)
-            prompt = (
-                f"When you say '{last_token}', do you mean {pretty_options}?\n"
-                "If not, please rephrase with a bit more detail."
-            )
-            return ClarificationDecision(
-                should_clarify=True,
-                reason="ambiguous abbreviation",
-                suggested_query=None,
-                message=prompt,
-            )
-
-    # Check if this is a response to a clarification request
+    # FIRST: Check if this is a confirmation response (e.g., "yes" after a clarification)
+    # Must be checked BEFORE any other logic to avoid "yes" triggering short-query checks
     if history and len(history) > 0:
         last_assistant_msg: Optional[str] = None
         for msg in reversed(history):
@@ -121,14 +77,13 @@ def evaluate_query_for_clarification(query: str, history: Optional[List[SessionM
         
         # If last message was a clarification request, check if this is a confirmation
         if last_assistant_msg and ("Just to confirm" in last_assistant_msg or "Did you mean" in last_assistant_msg):
-            # Common confirmation responses - don't clarify these
             confirmation_words = [
                 "yes", "yeah", "yep", "yup",
                 "ok", "okay", "sure", "correct",
                 "right", "that's right", "exactly"
             ]
-            text_lower = text.lower().strip()
-            if text_lower in confirmation_words or text_lower in [w + "." for w in confirmation_words]:
+            text_lower_confirm = text.lower().strip()
+            if text_lower_confirm in confirmation_words or text_lower_confirm in [w + "." for w in confirmation_words]:
                 # Try to recover the suggested query from the previous clarification message
                 suggested_from_last: Optional[str] = None
 
@@ -151,9 +106,125 @@ def evaluate_query_for_clarification(query: str, history: Optional[List[SessionM
                     suggested_query=suggested_from_last,
                     message=None,
                 )
+
+    # Explicit disambiguation for ambiguous abbreviations
+    abbreviation_candidates = {
+        "ds": ["data structures", "data science"],
+        "ml": ["machine learning"],
+        "dl": ["deep learning"],
+        "cv": ["computer vision"],
+        "nlp": ["natural language processing"],
+        "ai": ["artificial intelligence"],
+    }
+    text_lower = text.lower()
+    norm_lower = _normalize_query(text).lower()
+    words = norm_lower.split()
+
+    # Case 1: the entire text is just the abbreviation
+    if text_lower in abbreviation_candidates and len(text_lower) <= 3:
+        options = abbreviation_candidates[text_lower]
         
-        # Check if this is a follow-up question (like "explain more", "tell me more", etc.)
-        # These should be handled by conversation context, not clarification
+        # If we're in INTERNAL mode, try to filter options using the domain hint
+        if mode == "internal" and domain_hint:
+            dl = domain_hint.lower()
+            # ALL words from the option must appear in the domain hint
+            filtered = [
+                opt for opt in options
+                if all(word in dl for word in opt.split())
+            ]
+            if filtered:
+                options = filtered
+                # In internal mode with a clear match, AUTO-RESOLVE without asking
+                if len(options) == 1:
+                    return ClarificationDecision(
+                        should_clarify=False,
+                        reason="auto-resolved abbreviation",
+                        suggested_query=options[0],
+                        message=None,
+                    )
+        
+        # External mode or multiple options still remaining - ask for clarification
+        if len(options) == 1:
+            suggestion = options[0]
+            prompt = (
+                f"Did you mean '{suggestion}'?\n"
+                "If not, please rephrase with a bit more detail."
+            )
+            return ClarificationDecision(
+                should_clarify=True,
+                reason="ambiguous abbreviation",
+                suggested_query=suggestion,
+                message=prompt,
+            )
+        else:
+            pretty_options = " or ".join(f"'{opt}'" for opt in options)
+            prompt = (
+                f"When you say '{text_lower}', do you mean {pretty_options}?\n"
+                "If not, please rephrase with a bit more detail."
+            )
+            return ClarificationDecision(
+                should_clarify=True,
+                reason="ambiguous abbreviation",
+                suggested_query=None,
+                message=prompt,
+            )
+
+    # Case 2: last token is an abbreviation, e.g., "what is ds?"
+    if words:
+        last_token = words[-1]
+        if last_token in abbreviation_candidates and len(last_token) <= 3:
+            options = abbreviation_candidates[last_token]
+            
+            # If we're in INTERNAL mode, try to filter options using the domain hint
+            if mode == "internal" and domain_hint:
+                dl = domain_hint.lower()
+                # ALL words from the option must appear in the domain hint
+                filtered = [
+                    opt for opt in options
+                    if all(word in dl for word in opt.split())
+                ]
+                if filtered:
+                    options = filtered
+                    # In internal mode with a clear match, AUTO-RESOLVE without asking
+                    if len(options) == 1:
+                        expanded_query = " ".join(words[:-1] + [options[0]])
+                        return ClarificationDecision(
+                            should_clarify=False,
+                            reason="auto-resolved abbreviation",
+                            suggested_query=expanded_query,
+                            message=None,
+                        )
+            
+            # External mode or multiple options still remaining - ask for clarification
+            if len(options) == 1:
+                suggestion = options[0]
+                expanded_query = " ".join(words[:-1] + [suggestion])
+                prompt = (
+                    f"When you say '{last_token}', did you mean '{suggestion}'?\n"
+                    "If not, please rephrase with a bit more detail."
+                )
+                return ClarificationDecision(
+                    should_clarify=True,
+                    reason="ambiguous abbreviation",
+                    suggested_query=expanded_query,
+                    message=prompt,
+                )
+            else:
+                pretty_options = " or ".join(f"'{opt}'" for opt in options)
+                prompt = (
+                    f"When you say '{last_token}', do you mean {pretty_options}?\n"
+                    "If not, please rephrase with a bit more detail."
+                )
+                return ClarificationDecision(
+                    should_clarify=True,
+                    reason="ambiguous abbreviation",
+                    suggested_query=None,
+                    message=prompt,
+                )
+
+    # Check if this is a follow-up question (like "explain more", "tell me more", etc.)
+    # These should be handled by conversation context, not clarification
+    if history and len(history) > 0:
         follow_up_patterns = [
             r"explain\s+more",
             r"tell\s+me\s+more",
