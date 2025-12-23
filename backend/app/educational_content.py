@@ -474,7 +474,7 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
     columns = [
         "question", "type", "answer_description", "levels", "total_options",
         "choice_answer_one", "choice_answer_two", "choice_answer_three", 
-        "choice_answer_four", "correct_answers", "tag1", "tag2"
+        "choice_answer_four", "correct_answers"
     ]
     
     # Build type instructions based on question types
@@ -505,8 +505,7 @@ async def generate_assessment_table(request: GenerateContentRequest, config: Ass
         "   - For 'Choice': Provide exactly 4 multiple choice options\n"
         "   - For 'TrueFalse': Provide 'True' in choice_answer_one, 'False' in choice_answer_two, leave others empty\n"
         "   - For 'Essay': Leave empty or provide sample answer points\n"
-        "7. 'correct_answers': '1' or '1,2' for Choice; '1' or '2' for TrueFalse; leave empty for Essay\n"
-        "8. 'tag1', 'tag2': Tags\n\n"
+        "7. 'correct_answers': '1' or '1,2' for Choice; '1' or '2' for TrueFalse; leave empty for Essay\n\n"
         
         f"Create exactly {config.num_questions} rows. Difficulty: {config.difficulty}.\n"
     )
@@ -604,6 +603,11 @@ Instructions:
         
         norm_rows.append(norm)
     
+    # Remove tag1/tag2 columns (not in Excel format)
+    for row in norm_rows:
+        row.pop("tag1", None)
+        row.pop("tag2", None)
+    
     # Post-process for mixed mode: Fill empty cells with NA for true/false and essay
     has_multiple_choice = "multiple_choice" in config.question_types
     has_true_false = "true_false" in config.question_types
@@ -679,73 +683,42 @@ def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], su
     base_columns = ["question", "type", "answer_description", "levels"]
     base_labels = ["type", "answer description", "levels"]
     
-    # Optional columns
-    include_total_options = not is_essay_only
-    include_choice_one = not is_essay_only
-    include_choice_two = not is_essay_only
-    include_choice_three = not is_essay_only and not is_true_false_only
-    include_choice_four = not is_essay_only and not is_true_false_only
-    include_correct_answers = not is_essay_only
-    include_tags = True  # Always include tags
+    # Exact format matching Bulk Questions.xlsx:
+    # Column 1: question
+    # Column 2: type
+    # Column 3: answer_description (header: "answer description")
+    # Column 4: levels
+    # Column 5: total_options (header: "total options")
+    # Columns 6-9: choice_answer_one through choice_answer_four (no headers)
+    # Column 10: correct_answers (no header)
+    # NO tag1/tag2 columns
     
-    # Build column list and labels
-    columns = base_columns.copy()
-    labels = base_labels.copy()
+    columns = [
+        "question", "type", "answer_description", "levels", "total_options",
+        "choice_answer_one", "choice_answer_two", "choice_answer_three", 
+        "choice_answer_four", "correct_answers"
+    ]
+    
+    # Header labels (matching Excel format exactly)
+    labels = [
+        "Bulk Questions", "type", "answer description", "levels", "total options",
+        "", "", "", "", ""  # Empty headers for choice answers and correct_answers
+    ]
+    
     column_map = {
         "question": 0,
         "type": 1,
         "answer_description": 2,
-        "levels": 3
+        "levels": 3,
+        "total_options": 4,
+        "choice_answer_one": 5,
+        "choice_answer_two": 6,
+        "choice_answer_three": 7,
+        "choice_answer_four": 8,
+        "correct_answers": 9
     }
-    col_idx = 4
     
-    if include_total_options:
-        columns.append("total_options")
-        labels.append("total options")
-        column_map["total_options"] = col_idx
-        col_idx += 1
-    
-    if include_choice_one:
-        columns.append("choice_answer_one")
-        labels.append("choice answer one")
-        column_map["choice_answer_one"] = col_idx
-        col_idx += 1
-    
-    if include_choice_two:
-        columns.append("choice_answer_two")
-        labels.append("choice answer two")
-        column_map["choice_answer_two"] = col_idx
-        col_idx += 1
-    
-    if include_choice_three:
-        columns.append("choice_answer_three")
-        labels.append("choice answer three")
-        column_map["choice_answer_three"] = col_idx
-        col_idx += 1
-    
-    if include_choice_four:
-        columns.append("choice_answer_four")
-        labels.append("choice answer four")
-        column_map["choice_answer_four"] = col_idx
-        col_idx += 1
-    
-    if include_correct_answers:
-        columns.append("correct_answers")
-        labels.append("correct answers")
-        column_map["correct_answers"] = col_idx
-        col_idx += 1
-    
-    if include_tags:
-        columns.append("tag1")
-        labels.append("tag1")
-        column_map["tag1"] = col_idx
-        col_idx += 1
-        columns.append("tag2")
-        labels.append("tag2")
-        column_map["tag2"] = col_idx
-        col_idx += 1
-    
-    num_cols = len(columns)
+    num_cols = 10  # Always 10 columns
 
     # XLSX Format
     workbook = xlsxwriter.Workbook(xlsx_path)
@@ -773,14 +746,14 @@ def _write_assessment_csv_xlsx(storage_path: str, rows: List[Dict[str, str]], su
         "text_wrap": True
     })
     
-    # Row 1: Subject header (merged across all columns)
-    ws.write(0, 0, subject_name, subject_fmt)
+    # Row 1: Subject name in first column only (matching Excel format)
+    ws.write(0, 0, subject_name or "", subject_fmt)
     for col in range(1, num_cols):
         ws.write(0, col, '', subject_fmt)
     
-    # Row 2: Column labels
-    ws.write(1, 0, topic_name, label_fmt)
-    for col, label in enumerate(labels, start=1):
+    # Row 2: Column labels (matching Excel format exactly)
+    # First column: "Bulk Questions", then type, answer description, levels, total options, then empty columns
+    for col, label in enumerate(labels):
         ws.write(1, col, label, label_fmt)
     
     # Rows 3+: Data

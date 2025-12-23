@@ -1,9 +1,13 @@
 # backend/app/rag_store_chromadb.py
+from __future__ import annotations
 
 import os
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import logging
+
+# Disable ChromaDB telemetry to avoid OpenTelemetry dependency issues
+os.environ["CHROMA_TELEMETRY_DISABLED"] = "true"
 import chromadb
 
 # Configure logging
@@ -44,7 +48,7 @@ class ChromaRAGStore:
             logger.error(f"[RAG] Error initializing ChromaDB: {e}")
             raise
 
-    def add_documents(self, docs: List[tuple]) -> int:
+    def add_documents(self, docs: List[Tuple[str, Dict[str, Any]]]) -> int:
         """
         Add documents to ChromaDB with OpenAI embeddings.
         
@@ -62,19 +66,17 @@ class ChromaRAGStore:
             # Import embedding service
             from . import embedding_service
             
+            # Step 1: Validate and prepare all texts first
             texts = []
-            embeddings = []
             metadatas = []
             ids = []
-            failed_count = 0
             
-            print(f"\n[RAG] Processing {len(docs)} chunks for OpenAI embeddings...")
+            print(f"\n[RAG] Validating {len(docs)} chunks...")
             
             for i, (text, meta) in enumerate(docs):
                 # Validate text
                 if not text or not isinstance(text, str) or not text.strip():
                     logger.warning(f"[RAG] Skipping chunk {i+1}: empty or invalid text")
-                    failed_count += 1
                     continue
                 
                 # Clean text
@@ -83,27 +85,7 @@ class ChromaRAGStore:
                 
                 if len(clean_text) < 10:  # Skip very short chunks
                     logger.warning(f"[RAG] Skipping chunk {i+1}: too short ({len(clean_text)} chars)")
-                    failed_count += 1
                     continue
-                
-                # Generate OpenAI embedding (1536 dimensions)
-                print(f"[RAG] Generating embedding {i+1}/{len(docs)}...", end="\r")
-                embedding = embedding_service.embed_text(clean_text)
-                
-                if not embedding:
-                    logger.warning(f"[RAG] Failed to generate embedding for chunk {i+1}")
-                    failed_count += 1
-                    continue
-                
-                # Verify embedding dimension
-                if len(embedding) != 1536:
-                    logger.warning(f"[RAG] Wrong embedding dimension {len(embedding)} (expected 1536)")
-                    failed_count += 1
-                    continue
-                
-                # Add to lists
-                texts.append(clean_text)
-                embeddings.append(embedding)
                 
                 # Prepare metadata
                 metadata = {
@@ -118,12 +100,50 @@ class ChromaRAGStore:
                 # Add docId to metadata if present
                 if "docId" in meta:
                     metadata["docId"] = meta["docId"]
-                metadatas.append(metadata)
                 
-                # Generate unique ID
+                # Add to lists
+                texts.append(clean_text)
+                metadatas.append(metadata)
                 ids.append(str(uuid.uuid4()))
             
-            print("\n")  # New line after progress
+            if not texts:
+                logger.warning("[RAG] No valid chunks to process")
+                return 0
+            
+            print(f"[RAG] Processing {len(texts)} valid chunks with batch embeddings...")
+            
+            # Step 2: Generate embeddings in batches (much faster!)
+            embeddings = embedding_service.embed_texts_batch(texts, batch_size=100)
+            
+            # Step 3: Filter out failed embeddings and align data
+            valid_texts = []
+            valid_embeddings = []
+            valid_metadatas = []
+            valid_ids = []
+            failed_count = 0
+            
+            for i, embedding in enumerate(embeddings):
+                if embedding is None:
+                    logger.warning(f"[RAG] Failed to generate embedding for chunk {i+1}")
+                    failed_count += 1
+                    continue
+                
+                # Verify embedding dimension
+                if len(embedding) != 1536:
+                    logger.warning(f"[RAG] Wrong embedding dimension {len(embedding)} (expected 1536)")
+                    failed_count += 1
+                    continue
+                
+                valid_texts.append(texts[i])
+                valid_embeddings.append(embedding)
+                valid_metadatas.append(metadatas[i])
+                valid_ids.append(ids[i])
+            
+            # Update lists with valid data
+            texts = valid_texts
+            embeddings = valid_embeddings
+            metadatas = valid_metadatas
+            ids = valid_ids
             
             if not texts:
                 logger.warning("[RAG] No valid chunks with embeddings to add")
@@ -530,7 +550,7 @@ def get_rag_store() -> ChromaRAGStore:
     return _rag_store
 
 
-def add_documents(docs: List[tuple]) -> int:
+def add_documents(docs: List[Tuple[str, Dict[str, Any]]]) -> int:
     """Add documents to the RAG store."""
     store = get_rag_store()
     return store.add_documents(docs)

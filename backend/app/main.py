@@ -95,16 +95,46 @@ async def _preload_docs():
     docs_dir = os.getenv("DOCS_DIR", "./seed_docs")
     reindex = os.getenv("REINDEX_ON_START", "false").lower() == "true"
     skip_ingestion = os.getenv("SKIP_INGESTION_ON_START", "false").lower() == "true"
-
+    
+    # Check if ChromaDB already has documents (with error handling)
+    existing_count = 0
+    chromadb_exists = os.path.exists("./data/chroma/chroma.sqlite3")
+    
+    try:
+        existing_count = rag.count()
+    except Exception as e:
+        # If count fails but database file exists, assume documents are present
+        if chromadb_exists:
+            print(f"[startup] ⚠️  Could not count documents (error: {e}), but ChromaDB file exists - assuming documents present")
+            existing_count = 1  # Set to non-zero to trigger skip
+        else:
+            print(f"[startup] ⚠️  Could not count documents (error: {e}), and no ChromaDB file found")
+            existing_count = 0
+    
     if skip_ingestion:
         print(f"[startup] Skipping document ingestion (SKIP_INGESTION_ON_START=true)")
-        print(f"[startup] ChromaDB already has {rag.count()} documents")
+        if existing_count > 0:
+            print(f"[startup] ChromaDB has {existing_count} documents")
+        elif chromadb_exists:
+            print(f"[startup] ChromaDB database file exists (will load on first query)")
     elif not os.path.isdir(docs_dir):
         print(f"[startup] DOCS_DIR not found: {docs_dir}, skipping ingestion")
-        print(f"[startup] ChromaDB already has {rag.count()} documents")
+        if existing_count > 0:
+            print(f"[startup] ChromaDB has {existing_count} documents")
+        elif chromadb_exists:
+            print(f"[startup] ChromaDB database file exists (will load on first query)")
+    elif existing_count > 0 and not reindex:
+        # Auto-skip if documents already exist (unless forced reindex)
+        print(f"[startup] ChromaDB already has {existing_count} documents - skipping ingestion")
+        print(f"[startup] To re-ingest, set REINDEX_ON_START=true or use POST /reindex endpoint")
+    elif chromadb_exists and not reindex:
+        # Database file exists but count failed - skip ingestion to be safe
+        print(f"[startup] ChromaDB database file exists - skipping ingestion (to avoid duplicates)")
+        print(f"[startup] To force re-ingest, set REINDEX_ON_START=true or use POST /reindex endpoint")
     else:
         if reindex:
             # delete on-disk index and reset collection
+            print(f"[startup] REINDEX_ON_START=true - clearing existing {existing_count} documents...")
             shutil.rmtree("./data/chroma", ignore_errors=True)
             rag.reset_index()
 
@@ -233,7 +263,7 @@ def _build_pptx_bytes(
     # Split on double newlines for paragraphs/sections
     blocks = [b.strip() for b in content.split("\n\n") if b.strip()]
 
-    def add_bullet_slide(title_text: str, bullets: list[str]):
+    def add_bullet_slide(title_text: str, bullets: List[str]):
         slide = prs.slides.add_slide(bullet_layout)
         slide.shapes.title.text = title_text
         body = slide.shapes.placeholders[1].text_frame

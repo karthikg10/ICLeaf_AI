@@ -37,6 +37,49 @@ def embed_text(text: str, model: str = None) -> Optional[List[float]]:
         print(f"Error generating embedding: {e}")
         return None
 
+def embed_texts_batch(texts: List[str], model: str = None, batch_size: int = 100) -> List[Optional[List[float]]]:
+    """
+    Generate embeddings for multiple texts using OpenAI batch API.
+    
+    Args:
+        texts: List of text strings to embed
+        model: Embedding model name (defaults to text-embedding-3-small)
+        batch_size: Number of texts to process per API call (OpenAI supports up to 2048)
+        
+    Returns:
+        List of embeddings (same order as input texts), None for failed embeddings
+    """
+    if not embedding_client or not texts:
+        return [None] * len(texts) if texts else []
+    
+    model = model or get_embedding_model()
+    all_embeddings: List[Optional[List[float]]] = []
+    
+    # Process in batches
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (len(texts) + batch_size - 1) // batch_size
+        
+        try:
+            print(f"[RAG] Generating embeddings batch {batch_num}/{total_batches} ({len(batch_texts)} texts)...", end="\r")
+            response = embedding_client.embeddings.create(
+                input=batch_texts,  # Pass list of texts for batch processing
+                model=model
+            )
+            
+            # Extract embeddings in order
+            batch_embeddings = [item.embedding for item in response.data]
+            all_embeddings.extend(batch_embeddings)
+            
+        except Exception as e:
+            print(f"\n[RAG] Error generating batch embeddings: {e}")
+            # Add None for each failed text in this batch
+            all_embeddings.extend([None] * len(batch_texts))
+    
+    print()  # New line after progress
+    return all_embeddings
+
 def process_document_content(content: str, doc_name: str, chunk_size: int = 1000, overlap: int = 200) -> List[Dict[str, Any]]:
     """Process document content into chunks with embeddings using token-based chunking."""
     if not content.strip():
