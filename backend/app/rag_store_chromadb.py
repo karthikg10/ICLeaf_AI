@@ -224,6 +224,14 @@ class ChromaRAGStore:
             # 3) Query Chroma
             # Note: If you get "ef or M is too small" errors, you may need to recreate the collection
             # with higher HNSW parameters (see __init__ method)
+            
+            # Debug: Log the where clause for docId queries
+            if doc_id:
+                logger.info(f"[RAG] Querying with docId filter: {doc_id}, where clause: {where}")
+                # Also check if any chunks exist with this docId
+                test_get = self.collection.get(where={"docId": doc_id}, limit=1)
+                logger.info(f"[RAG] Direct get() with docId filter found {len(test_get.get('ids', []))} chunks")
+            
             results = self.collection.query(
                 query_embeddings=[query_embedding],
                 n_results=min(top_k, 100),  # Limit to avoid HNSW issues with very large top_k

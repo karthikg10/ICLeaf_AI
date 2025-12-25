@@ -55,6 +55,168 @@ upload_semaphore = asyncio.Semaphore(5)
 client = OpenAI(api_key=deps.OPENAI_API_KEY) if deps.OPENAI_API_KEY else None
 
 
+def is_greeting(message: str) -> bool:
+    """Check if message is a casual greeting using pattern matching.
+    
+    Returns True only if the message is purely a greeting without an actual question.
+    If the message contains both a greeting AND a question, returns False so the question is processed.
+    """
+    if not message:
+        return False
+    
+    greetings = [
+        "hi", "hello", "hey", "greetings", "good morning", "good afternoon",
+        "good evening", "how are you", "how's it going", "what's up",
+        "howdy", "sup", "hi there", "hello there", "hey there",
+        "hiya", "how do you do", "what's going on", "how's everything",
+        "how's your day", "what's happening"
+    ]
+    
+    # Conversational follow-ups that often come after greetings
+    follow_ups = [
+        "how are you", "how are you doing", "how's it going", "how's everything",
+        "what's up", "what's going on", "how's your day", "how do you do",
+        "nice to meet you", "pleased to meet you"
+    ]
+    
+    # Question indicators - if these appear, it's likely a real question, not just a greeting
+    question_indicators = [
+        "can you", "could you", "would you", "will you", "please explain",
+        "explain", "what is", "what are", "what does", "what do", "what was",
+        "how does", "how do", "how is", "how are", "how can", "how will",
+        "tell me", "describe", "define", "show me", "help me", "i need",
+        "i want to know", "i'd like to know", "i'm looking for", "i want",
+        "what about", "how about", "why", "when", "where", "which"
+    ]
+    
+    message_lower = message.lower().strip()
+    # Remove trailing punctuation for matching
+    message_clean = message_lower.rstrip('.,!?;:')
+    
+    # FIRST: Check if message contains question indicators
+    # If it does, it's likely a real question, not just a greeting
+    for indicator in question_indicators:
+        if indicator in message_clean:
+            # Check if the indicator appears AFTER any greeting phrases
+            # If so, it's a question that should be processed normally
+            indicator_pos = message_clean.find(indicator)
+            
+            # Find the last greeting/follow-up position
+            last_greeting_pos = -1
+            for greeting in greetings + follow_ups:
+                pos = message_clean.rfind(greeting)
+                if pos > last_greeting_pos:
+                    last_greeting_pos = pos
+            
+            # If question indicator appears after greetings, it's a real question
+            if indicator_pos > last_greeting_pos or last_greeting_pos == -1:
+                return False  # Not just a greeting - contains a question
+    
+    # Check if message is exactly a greeting
+    if message_clean in greetings:
+        return True
+    
+    # Check if message starts with a greeting
+    for greeting in greetings:
+        if message_clean.startswith(greeting):
+            # Get remaining text after the greeting
+            remaining = message_clean[len(greeting):].strip()
+            
+            # Remove leading punctuation/whitespace
+            remaining = remaining.lstrip(',.!?;: ').strip()
+            
+            # If no remaining text, it's just a greeting
+            if not remaining:
+                return True
+            
+            # If remaining text is also a greeting or follow-up, treat as greeting
+            if remaining in greetings or remaining in follow_ups:
+                return True
+            
+            # Check if remaining text starts with a follow-up phrase
+            for follow_up in follow_ups:
+                if remaining.startswith(follow_up):
+                    # Allow follow-up followed by punctuation or end
+                    rest_after_followup = remaining[len(follow_up):].strip()
+                    rest_after_followup = rest_after_followup.lstrip(',.!?;: ').strip()
+                    if not rest_after_followup:
+                        return True
+                    # If there's more text after follow-up, check if it's a question
+                    for indicator in question_indicators:
+                        if indicator in rest_after_followup:
+                            return False  # Contains a question
+    
+    # Also check if message contains multiple greeting phrases (e.g., "hello, how are you doing")
+    greeting_count = sum(1 for greeting in greetings if greeting in message_clean)
+    follow_up_count = sum(1 for follow_up in follow_ups if follow_up in message_clean)
+    
+    # If message contains 2+ greeting/follow-up phrases AND no question indicators, it's likely a greeting
+    if greeting_count + follow_up_count >= 2:
+        # Double-check: make sure there are no question indicators
+        has_question = any(indicator in message_clean for indicator in question_indicators)
+        if not has_question:
+            # Additional check: if there's significant remaining text after greetings, it might be a question
+            # Find the last greeting/follow-up phrase position
+            last_phrase_end = 0
+            for phrase in greetings + follow_ups:
+                last_pos = message_clean.rfind(phrase)
+                if last_pos != -1:
+                    phrase_end = last_pos + len(phrase)
+                    if phrase_end > last_phrase_end:
+                        last_phrase_end = phrase_end
+            
+            # Check if there's substantial text after the last greeting phrase
+            if last_phrase_end > 0:
+                remaining_after_all = message_clean[last_phrase_end:].strip()
+                remaining_after_all = remaining_after_all.lstrip(',.!?;: ').strip()
+                # If there's meaningful text (3+ chars) after greetings, it's likely a question
+                if len(remaining_after_all) >= 3:
+                    return False  # Has additional content, treat as question
+            return True
+    
+    return False
+
+
+async def get_greeting_response_llm(message: str, mode: str, client: OpenAI) -> str:
+    """Generate natural greeting response using LLM."""
+    if not client:
+        # Fallback to simple responses if no OpenAI client
+        if mode == "internal":
+            return "Hello! I'm here to help you with questions about your uploaded documents. What would you like to know?"
+        else:
+            return "Hello! How can I assist you today?"
+    
+    system_prompt = f"""You are a friendly AI assistant. 
+Respond naturally to casual greetings and small talk.
+Keep responses brief (1-2 sentences) and friendly.
+Mode: {mode}
+"""
+    
+    if mode == "internal":
+        system_prompt += "You help users with questions about their uploaded documents. Mention that you're ready to answer questions about their documents."
+    else:
+        system_prompt += "You answer general questions. Be helpful and welcoming."
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message}
+            ],
+            temperature=0.7,
+            max_tokens=100
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[CHATBOT] Error generating greeting response: {e}")
+        # Fallback to simple responses
+        if mode == "internal":
+            return "Hello! I'm here to help you with questions about your uploaded documents. What would you like to know?"
+        else:
+            return "Hello! How can I assist you today?"
+
+
 def is_ambiguous_query(text: str) -> bool:
     """Heuristic gate to decide if we should expand using history."""
     t = (text or "").strip().lower()
@@ -275,6 +437,42 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         docName=req.docName
     )
     session_manager.append_history(req.sessionId, user_msg)
+    
+    # Check for greetings early - return friendly response without RAG processing
+    if is_greeting(req.message):
+        greeting_response = await get_greeting_response_llm(req.message, req.mode, client)
+        
+        assistant_msg = SessionMessage(
+            role="assistant",
+            content=greeting_response,
+            subjectId=user_msg.subjectId,
+            topicId=user_msg.topicId,
+            docName=user_msg.docName
+        )
+        session_manager.append_history(req.sessionId, assistant_msg)
+        
+        response_time = time.monotonic() - start_time
+        conversation = Conversation(
+            sessionId=req.sessionId,
+            userId=req.userId,
+            mode=req.mode,
+            subjectId=req.subjectId,
+            topicId=req.topicId,
+            docName=req.docName,
+            userMessage=req.message,
+            aiResponse=greeting_response,
+            sources=[],
+            responseTime=response_time,
+            tokenCount=len(greeting_response.split())
+        )
+        conversation_manager.add_conversation(conversation)
+        
+        return ChatResponse(
+            answer=greeting_response,
+            sources=[],
+            sessionId=req.sessionId,
+            mode=req.mode
+        )
 
     # Get conversation history for clarification check
     conversation_history = session_manager.get_history(req.sessionId, last=10)
@@ -290,10 +488,18 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
         mode=req.mode,
         domain_hint=domain_hint,
     )
+    
+    # Debug logging
+    if clarification.should_clarify:
+        print(f"[CHATBOT] Clarification needed: {clarification.reason}, message: {clarification.message[:100] if clarification.message else 'None'}")
+    
     if clarification.should_clarify:
         answer = clarification.message or (
             "I want to be sure I understand your request. Could you rephrase it?"
         )
+        
+        print(f"[CHATBOT] Returning clarification response (should_clarify=True). Reason: {clarification.reason}")
+        print(f"[CHATBOT] Clarification message: {answer[:100]}...")
 
         assistant_msg = SessionMessage(
             role="assistant",
@@ -314,26 +520,35 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
             docName=req.docName,
             userMessage=req.message,
             aiResponse=answer,
-            sources=[],
+            sources=[],  # Explicitly empty sources for clarification
             responseTime=response_time,
             tokenCount=len(answer.split())
         )
         conversation_manager.add_conversation(conversation)
 
+        # Return early with clarification message - NO web search, NO sources
+        print(f"[CHATBOT] Returning clarification response with empty sources (no web search)")
         return ChatResponse(
             answer=answer,
-            sources=[],
+            sources=[],  # Explicitly return empty sources
             sessionId=req.sessionId,
-            mode=req.mode
+            mode=req.mode,
+            timestamp=datetime.now().isoformat()
         )
     # After clarification: decide what we will actually search/answer on
     effective_message = clarification.suggested_query or req.message
     
-    # If effective_message is a single word (from confirmation), expand it to a more general query
-    # This prevents retrieving overly specific content (e.g., "advantages of X") when user wants general info
-    if clarification.suggested_query and len(effective_message.split()) == 1:
+    # Auto-expand single words to "explain X" for better retrieval
+    # This applies to all single-word queries (not just from clarification)
+    # This prevents retrieving overly specific content when user wants general info
+    # BUT: Don't expand confirmation words like "yes", "ok", etc.
+    confirmation_words = ["yes", "yeah", "yep", "yup", "ok", "okay", "sure", "correct", "right"]
+    if len(effective_message.split()) == 1 and effective_message.lower().strip() not in confirmation_words:
         # Expand single-word queries to "explain X" for broader, more general retrieval
-        effective_message = f"explain {effective_message.lower()}"
+        # But only if it's not already expanded (check if it already starts with "explain")
+        if not effective_message.lower().startswith("explain "):
+            effective_message = f"explain {effective_message.lower()}"
+            print(f"[CHATBOT] Auto-expanded single word query: '{req.message}' -> '{effective_message}'")
 
     # INTERNAL (RAG) mode
     if req.mode == "internal":
@@ -400,22 +615,28 @@ async def _process_chatbot_query(req: ChatRequest, start_time: float) -> ChatRes
                 try:
                     # UUID-style docId vs legacy filename
                     if len(doc_id) == 36 and doc_id.count('-') == 4:  # UUID format
+                        # When filtering by specific docId, don't apply subject_id/topic_id filters
+                        # as they might not match exactly and cause 0 results
+                        # The docId is unique and sufficient for filtering
+                        print(f"[CHATBOT] Querying docId '{doc_id}' (ignoring subject_id/topic_id filters for docId-specific query)")
                         doc_hits = rag.query(
                             search_query,  # Use expanded query for better context
                             top_k=hits_per_doc,
                             min_similarity=DOC_ID_QUERY_MIN_SIMILARITY,  # VERY permissive
-                            subject_id=subject_id_filter,
-                            topic_id=topic_id_filter,
+                            subject_id=None,  # Don't filter by subject_id when docId is specified
+                            topic_id=None,    # Don't filter by topic_id when docId is specified
                             doc_id=doc_id
                         )
                     else:
                         # Legacy: filter by doc_name or filename
+                        # When filtering by specific doc_name, don't apply subject_id/topic_id filters
+                        print(f"[CHATBOT] Querying doc_name '{doc_id}' (ignoring subject_id/topic_id filters for doc_name-specific query)")
                         doc_hits = rag.query(
                             search_query,  # Use expanded query for better context
                             top_k=hits_per_doc,
                             min_similarity=DOC_ID_QUERY_MIN_SIMILARITY,  # VERY permissive
-                            subject_id=subject_id_filter,
-                            topic_id=topic_id_filter,
+                            subject_id=None,  # Don't filter by subject_id when doc_name is specified
+                            topic_id=None,    # Don't filter by topic_id when doc_name is specified
                             doc_name=doc_id
                         )
                     

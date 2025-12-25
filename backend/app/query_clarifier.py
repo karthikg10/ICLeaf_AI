@@ -68,22 +68,37 @@ def evaluate_query_for_clarification(
 
     # FIRST: Check if this is a confirmation response (e.g., "yes" after a clarification)
     # Must be checked BEFORE any other logic to avoid "yes" triggering short-query checks
-    if history and len(history) > 0:
-        last_assistant_msg: Optional[str] = None
-        for msg in reversed(history):
-            if msg.role == "assistant":
-                last_assistant_msg = msg.content or ""
-                break
-        
-        # If last message was a clarification request, check if this is a confirmation
-        if last_assistant_msg and ("Just to confirm" in last_assistant_msg or "Did you mean" in last_assistant_msg):
-            confirmation_words = [
-                "yes", "yeah", "yep", "yup",
-                "ok", "okay", "sure", "correct",
-                "right", "that's right", "exactly"
-            ]
-            text_lower_confirm = text.lower().strip()
-            if text_lower_confirm in confirmation_words or text_lower_confirm in [w + "." for w in confirmation_words]:
+    confirmation_words = [
+        "yes", "yeah", "yep", "yup",
+        "ok", "okay", "sure", "correct",
+        "right", "that's right", "exactly"
+    ]
+    text_lower_confirm = text.lower().strip()
+    # Remove punctuation for matching
+    text_clean_confirm = text_lower_confirm.rstrip('.,!?;:')
+    is_confirmation_word = text_clean_confirm in confirmation_words or text_clean_confirm in [w + "." for w in confirmation_words]
+    
+    if is_confirmation_word:
+        # Check if there's a clarification message in history
+        if history and len(history) > 0:
+            last_assistant_msg: Optional[str] = None
+            for msg in reversed(history):
+                if msg.role == "assistant":
+                    last_assistant_msg = msg.content or ""
+                    break
+            
+            # If last message was a clarification request, handle as confirmation
+            is_clarification = (
+                last_assistant_msg and (
+                    "Just to confirm" in last_assistant_msg or 
+                    "Did you mean" in last_assistant_msg or
+                    "did you mean" in last_assistant_msg or
+                    "When you say" in last_assistant_msg or
+                    "when you say" in last_assistant_msg
+                )
+            )
+            
+            if is_clarification:
                 # Try to recover the suggested query from the previous clarification message
                 suggested_from_last: Optional[str] = None
 
@@ -93,12 +108,20 @@ def evaluate_query_for_clarification(
                 if m1:
                     suggested_from_last = m1.group(1)
 
-                # Case 2: abbreviation clarifier:
-                # "Did you mean 'machine learning'?\nIf not, please rephrase..."
+                # Case 2: abbreviation clarifier patterns:
+                # "Did you mean 'machine learning'?" or "did you mean 'machine learning'?"
+                # "When you say 'ml', did you mean 'machine learning'?"
                 if suggested_from_last is None:
-                    m2 = re.search(r"Did you mean '([^']+)'", last_assistant_msg)
+                    # Try pattern: "did you mean 'X'"
+                    m2 = re.search(r"did you mean ['\"]([^'\"]+)['\"]", last_assistant_msg, re.IGNORECASE)
                     if m2:
                         suggested_from_last = m2.group(1)
+                    
+                    # Try pattern: "When you say X, did you mean Y"
+                    if suggested_from_last is None:
+                        m3 = re.search(r"when you say '[^']+',\s+did you mean ['\"]([^'\"]+)['\"]", last_assistant_msg, re.IGNORECASE)
+                        if m3:
+                            suggested_from_last = m3.group(1)
 
                 return ClarificationDecision(
                     should_clarify=False,
@@ -106,6 +129,15 @@ def evaluate_query_for_clarification(
                     suggested_query=suggested_from_last,
                     message=None,
                 )
+        
+        # If "yes" but no clarification in history, ask what topic they're referring to
+        return ClarificationDecision(
+            should_clarify=True,
+            reason="yes without context",
+            suggested_query=None,
+            message="What topic are you referring to?",
+        )
+    
 
     # Explicit disambiguation for ambiguous abbreviations
     abbreviation_candidates = {
@@ -243,6 +275,42 @@ def evaluate_query_for_clarification(
                 return ClarificationDecision(should_clarify=False)
 
     words = text.split()
+    
+    # NEW: Skip clarification for single clear words when context exists
+    # This handles cases like "stacks" when user has selected a specific document
+    if len(words) == 1:
+        single_word = words[0].lower()
+        
+        # Skip if it's an abbreviation (already handled above)
+        if single_word in abbreviation_candidates:
+            # Let abbreviation logic handle it (already processed above)
+            pass
+        else:
+            # Single clear word - check if we have context
+            has_context = False
+            if mode == "internal":
+                # In internal mode with docId/subjectId/topicId, we have context
+                has_context = bool(domain_hint)
+            
+            # If it's a reasonably long word (>= 4 chars) and we have context, skip clarification
+            if len(single_word) >= 4 and has_context:
+                # Auto-expand to "explain X" for better retrieval
+                return ClarificationDecision(
+                    should_clarify=False,
+                    reason="single clear term with context",
+                    suggested_query=f"explain {single_word}",
+                    message=None,
+                )
+            elif len(single_word) >= 5:
+                # Even without context, if it's a clear 5+ char word, proceed
+                # Auto-expand to "explain X" for better retrieval
+                return ClarificationDecision(
+                    should_clarify=False,
+                    reason="single clear term",
+                    suggested_query=f"explain {single_word}",
+                    message=None,
+                )
+    
     reasons: List[str] = []
 
     # Heuristic: very short queries often need more context.
